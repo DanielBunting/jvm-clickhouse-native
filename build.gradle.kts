@@ -32,4 +32,14 @@ subprojects {
         (options as org.gradle.external.javadoc.StandardJavadocDocletOptions)
             .addStringOption("Xdoclint:none", "-quiet")
     }
+
+    // Coverage: every Java module gets JaCoCo with an XML report, uploaded to
+    // Codecov by CI. Unit tests only — the integration test tasks run in
+    // separate CI jobs and don't record coverage.
+    plugins.withId("java") {
+        apply(plugin = "jacoco")
+        tasks.withType<JacocoReport>().configureEach {
+            reports.xml.required.set(true)
+        }
+    }
 }

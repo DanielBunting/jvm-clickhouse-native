@@ -1,5 +1,9 @@
 # jvm-clickhouse-native
 
+[![CI](https://github.com/DanielBunting/jvm-clickhouse-native/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DanielBunting/jvm-clickhouse-native/actions/workflows/ci.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.danielbunting.clickhouse/clickhouse-native-client)](https://central.sonatype.com/artifact/io.github.danielbunting.clickhouse/clickhouse-native-client)
+[![Snapshot](https://img.shields.io/maven-metadata/v?metadataUrl=https%3A%2F%2Fcentral.sonatype.com%2Frepository%2Fmaven-snapshots%2Fio%2Fgithub%2Fdanielbunting%2Fclickhouse%2Fclickhouse-native-client%2Fmaven-metadata.xml&label=snapshot&color=blue)](https://central.sonatype.com/repository/maven-snapshots/io/github/danielbunting/clickhouse/clickhouse-native-client/maven-metadata.xml)
+[![codecov](https://codecov.io/gh/DanielBunting/jvm-clickhouse-native/branch/main/graph/badge.svg)](https://codecov.io/gh/DanielBunting/jvm-clickhouse-native)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![JVM](https://img.shields.io/badge/JVM-17%2B-orange)](https://adoptium.net/)
 
@@ -69,19 +73,14 @@ Full reference with notes and insert-binding rules: [docs/data-types.md](docs/da
 
 ## Installation
 
-> **Not yet on Maven Central.** Until the first release, build from source and publish locally:
->
-> ```bash
-> git clone https://github.com/DanielBunting/jvm-clickhouse-native
-> cd jvm-clickhouse-native && ./gradlew publishToMavenLocal
-> ```
+Releases are on [Maven Central](https://central.sonatype.com/artifact/io.github.danielbunting.clickhouse/clickhouse-native-client); all three modules always share one version. The Maven Central badge above (or the [Releases page](https://github.com/DanielBunting/jvm-clickhouse-native/releases)) shows the latest — substitute it for `<version>` below.
 
 ```kotlin
-// Gradle (Kotlin DSL) — with mavenLocal() in repositories
+// Gradle (Kotlin DSL)
 dependencies {
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client:0.1.0-SNAPSHOT")
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-kotlin:0.1.0-SNAPSHOT") // Kotlin extensions
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-jdbc:0.1.0-SNAPSHOT")   // JDBC driver
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client:<version>")
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-kotlin:<version>") // Kotlin extensions
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-jdbc:<version>")   // JDBC driver
 }
 ```
 
@@ -90,8 +89,19 @@ dependencies {
 <dependency>
     <groupId>io.github.danielbunting.clickhouse</groupId>
     <artifactId>clickhouse-native-client</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version><!-- version --></version>
 </dependency>
+```
+
+### Snapshots
+
+Every merge to `main` publishes a `-SNAPSHOT` build (the snapshot badge above shows the current one) to the Central Portal snapshots repository. Snapshots are mutable and expire after ~90 days — fine for trying out unreleased fixes, not for shipping. Add the repository:
+
+```kotlin
+repositories {
+    mavenCentral()
+    maven("https://central.sonatype.com/repository/maven-snapshots/")
+}
 ```
 
 ## Basic Usage
@@ -275,7 +285,7 @@ Per-row `Flow` emission has real overhead; for hot paths, read columnar blocks a
 - Apple M5, 24 GB RAM, macOS 26.5.1; OpenJDK 17.0.18 (Homebrew)
 - ClickHouse `clickhouse/clickhouse-server:25.8` in Docker (localhost loopback — network cost is minimized, protocol/allocation cost dominates)
 - JMH 2 warmup + 3 measurement iterations, 1 fork, `-prof gc`; 1M-row table, June 2026 run
-- Drivers: this client 0.1.0-SNAPSHOT, `com.clickhouse:clickhouse-jdbc:0.6.5`, `com.github.housepower:clickhouse-native-jdbc:2.7.1`
+- Drivers: this client (built from `main`, June 2026), `com.clickhouse:clickhouse-jdbc:0.6.5`, `com.github.housepower:clickhouse-native-jdbc:2.7.1`
 
 Reproduce with `./gradlew :benchmarks:jmh` (requires Docker) — see [`benchmarks/`](benchmarks/).
 
