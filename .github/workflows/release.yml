@@ -1,0 +1,86 @@
+# Manual release: tags the current main and publishes all three modules
+# (clickhouse-native-client, -jdbc, -kotlin) to Maven Central in lockstep.
+#
+# The version is inferred, never typed in: <VERSION file major.minor>.<commit
+# count since VERSION last changed>. It therefore matches the most recent
+# snapshot published from the same commit. No commit is pushed back to main —
+# bumping major/minor is done by editing VERSION in a regular PR, which resets
+# the patch counter to 0.
+#
+# The tag and GitHub Release are created only after the Central publish
+# succeeds, so a failed publish leaves no dangling tag; just re-run the
+# workflow. Re-running on a commit that is already tagged fails fast.
+#
+# Required repository secrets:
+#   MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD  — Central Portal token
+#   SIGNING_KEY / SIGNING_KEY_PASSWORD               — ASCII-armored GPG key
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag & publish to Maven Central
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release runs from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Releases must be dispatched from main (got ${{ github.ref }})" >&2
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          # Commit-count versioning needs the full history and existing tags.
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compute release version
+        id: version
+        run: |
+          set -euo pipefail
+          MM=$(tr -d '[:space:]' < VERSION)
+          BUMP_COMMIT=$(git log -1 --format=%H -- VERSION)
+          if [ -z "$BUMP_COMMIT" ]; then
+            echo "VERSION file is not tracked by git" >&2
+            exit 1
+          fi
+          PATCH=$(git rev-list --count "$BUMP_COMMIT..HEAD")
+          V="$MM.$PATCH"
+          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "Tag v$V already exists — nothing new to release since the last one." >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Release version: $V"
+      - name: Build & unit tests
+        run: ./gradlew build -PbuildVersion='${{ steps.version.outputs.version }}'
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        # publishAndReleaseToMavenCentral auto-promotes the Central Portal
+        # deployment; the plain publish task would park it awaiting a manual
+        # click in the Sonatype UI.
+        run: ./gradlew publishAndReleaseToMavenCentral -PbuildVersion='${{ steps.version.outputs.version }}'
+      - name: Tag and create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git tag "v$V"
+          git push origin "v$V"
+          gh release create "v$V" --generate-notes --title "v$V"

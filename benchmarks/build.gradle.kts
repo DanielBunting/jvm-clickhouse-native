@@ -39,4 +39,7 @@ jmh {
     fork.set(1)
     // Report allocation rate / bytes-per-op so the low-allocation claim is measurable.
     profilers.add("gc")
+    // ch.host is read inside the forked benchmark JVM (ClickHouseResource), which
+    // doesn't inherit the Gradle invocation's -D flags — forward it explicitly.
+    providers.systemProperty("ch.host").orNull?.let { jvmArgsAppend.add("-Dch.host=$it") }
 }
