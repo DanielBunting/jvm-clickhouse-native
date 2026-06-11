@@ -47,10 +47,14 @@ jobs:
       # (client, jdbc, kotlin). Testcontainers uses the runner's Docker daemon.
       - run: ./gradlew integrationTest
 
-  # Full supported-version matrix is too slow for every PR — main pushes only.
+  # Full supported-version matrix is too slow for every PR — push events only.
+  # Push events fire solely for branches listed under on.push.branches, so that
+  # list is the single switch for which branches get the full pipeline
+  # (including the snapshot publish below). It should normally contain only
+  # main; extra branches are for temporary end-to-end smoke tests.
   integration-matrix:
     name: Integration tests (all ClickHouse versions)
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,11 +65,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew integrationTestAllVersions
 
-  # Snapshots only ever publish from main — the commit-count version is only
-  # meaningful on main's history.
+  # Publishes from every branch in on.push.branches (normally just main; the
+  # commit-count version is only meaningful on main's history). Snapshots are
+  # mutable and expire after ~90 days, so a smoke-test publish from a temporary
+  # branch is harmless.
   publish-snapshot:
     name: Publish snapshot to Maven Central
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     needs: [build, integration]
     runs-on: ubuntu-latest
     # Serialize snapshot publishes so rapid merges land in commit order.
