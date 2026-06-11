@@ -1,0 +1,110 @@
+# CI for PRs and main.
+#
+# PRs:   build (unit tests) + default-image integration tests.
+# main:  the above, plus the full ClickHouse version matrix and a -SNAPSHOT
+#        publish of all three modules to the Central Portal snapshots repo
+#        (https://central.sonatype.com/repository/maven-snapshots/).
+#
+# Version scheme: VERSION holds major.minor; patch = commit count on main since
+# VERSION last changed. Snapshots publish <major.minor>.<patch>-SNAPSHOT; the
+# release workflow (release.yml) publishes the same number without the suffix.
+#
+# Required repository secrets (publish-snapshot only):
+#   MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD  — Central Portal token
+#   SIGNING_KEY / SIGNING_KEY_PASSWORD               — ASCII-armored GPG key
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      # Module test tasks exclude the 'integration' tag, so this stays Docker-free.
+      - run: ./gradlew build
+
+  integration:
+    name: Integration tests (default ClickHouse)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      # Unqualified task name runs the suite in every module that defines it
+      # (client, jdbc, kotlin). Testcontainers uses the runner's Docker daemon.
+      - run: ./gradlew integrationTest
+
+  # Full supported-version matrix is too slow for every PR — push events only.
+  # Push events fire solely for branches listed under on.push.branches, so that
+  # list is the single switch for which branches get the full pipeline
+  # (including the snapshot publish below). It should normally contain only
+  # main; extra branches are for temporary end-to-end smoke tests.
+  integration-matrix:
+    name: Integration tests (all ClickHouse versions)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew integrationTestAllVersions
+
+  # Publishes from every branch in on.push.branches (normally just main; the
+  # commit-count version is only meaningful on main's history). Snapshots are
+  # mutable and expire after ~90 days, so a smoke-test publish from a temporary
+  # branch is harmless.
+  publish-snapshot:
+    name: Publish snapshot to Maven Central
+    if: github.event_name == 'push'
+    needs: [build, integration]
+    runs-on: ubuntu-latest
+    # Serialize snapshot publishes so rapid merges land in commit order.
+    concurrency:
+      group: snapshot-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Commit-count versioning needs the full history.
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compute snapshot version
+        id: version
+        run: |
+          set -euo pipefail
+          MM=$(tr -d '[:space:]' < VERSION)
+          BUMP_COMMIT=$(git log -1 --format=%H -- VERSION)
+          if [ -z "$BUMP_COMMIT" ]; then
+            echo "VERSION file is not tracked by git" >&2
+            exit 1
+          fi
+          PATCH=$(git rev-list --count "$BUMP_COMMIT..HEAD")
+          echo "version=$MM.$PATCH-SNAPSHOT" >> "$GITHUB_OUTPUT"
+          echo "Snapshot version: $MM.$PATCH-SNAPSHOT"
+      - name: Publish snapshot
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew publishToMavenCentral -PbuildVersion='${{ steps.version.outputs.version }}'
