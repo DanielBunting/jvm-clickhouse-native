@@ -13,7 +13,11 @@
 ./gradlew integrationTest           # integration suite against the default ClickHouse image
 ./gradlew integrationTestAllVersions  # same suite against every supported ClickHouse version
 ./gradlew :benchmarks:jmh           # JMH benchmarks vs the official and housepower clients
+./gradlew jacocoTestReport          # unit-test coverage (HTML + XML under each module's build/reports/jacoco)
 ```
+
+Unit-test coverage is uploaded to [Codecov](https://codecov.io/gh/DanielBunting/jvm-clickhouse-native)
+on every CI run; integration tests don't count toward it.
 
 Integration tests are JUnit tests tagged `integration`; the plain `test` task
 excludes them so the default build stays fast and offline. The supported

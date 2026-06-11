@@ -15,28 +15,22 @@ The native client talks to the **native TCP port 9000** (not the HTTP port 8123)
 
 ## Add the dependency
 
-The library is not yet on Maven Central. Until the first release, publish it locally:
-
-```bash
-git clone https://github.com/DanielBunting/jvm-clickhouse-native
-cd jvm-clickhouse-native
-./gradlew publishToMavenLocal
-```
-
-Then depend on it with `mavenLocal()` in your repositories:
+Releases are on [Maven Central](https://central.sonatype.com/artifact/io.github.danielbunting.clickhouse/clickhouse-native-client) — check there (or the repo's [Releases page](https://github.com/DanielBunting/jvm-clickhouse-native/releases)) for the latest version and use it below:
 
 ```kotlin
 // build.gradle.kts
-repositories { mavenLocal(); mavenCentral() }
+repositories { mavenCentral() }
 
 dependencies {
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client:0.1.0-SNAPSHOT")
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client:<version>")
     // Kotlin coroutines/Flow extensions (optional):
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-kotlin:0.1.0-SNAPSHOT")
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-kotlin:<version>")
     // JDBC driver (optional):
-    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-jdbc:0.1.0-SNAPSHOT")
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-jdbc:<version>")
 }
 ```
+
+Unreleased `-SNAPSHOT` builds from `main` are also available — see [Installation](../README.md#installation) in the README.
 
 ## Open a connection
 
