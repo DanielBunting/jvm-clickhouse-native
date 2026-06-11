@@ -57,4 +57,15 @@ public abstract class IntegrationTestBase {
     protected static int clickHousePort() {
         return CLICK_HOUSE.getMappedNativePort();
     }
+
+    /**
+     * Returns the host-side port mapped to the ClickHouse HTTP port
+     * ({@value ClickHouseContainer#HTTP_PORT}), used by the official Java
+     * client in cross-client round-trip tests.
+     *
+     * @return the mapped port number assigned by Docker
+     */
+    protected static int clickHouseHttpPort() {
+        return CLICK_HOUSE.getMappedHttpPort();
+    }
 }
