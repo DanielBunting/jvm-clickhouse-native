@@ -12,6 +12,7 @@
 # Required repository secrets (publish-snapshot only):
 #   MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD  — Central Portal token
 #   SIGNING_KEY / SIGNING_KEY_PASSWORD               — ASCII-armored GPG key
+#   CODECOV_TOKEN — Codecov upload token (app.codecov.io)
 name: CI
 
 on:
