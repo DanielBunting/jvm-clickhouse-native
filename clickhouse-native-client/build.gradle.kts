@@ -61,11 +61,11 @@ mavenPublishing {
             "High-performance native TCP (port 9000) ClickHouse client for the JVM " +
                 "with column-major data plane and LZ4/Zstd compression."
         )
-        url.set("https://github.com/DanielBunting/placheolder-java-clickhouse")
+        url.set("https://github.com/DanielBunting/jvm-clickhouse-native")
         licenses {
             license {
-                name.set("MIT License")
-                url.set("https://opensource.org/license/mit")
+                name.set("Apache-2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0")
                 distribution.set("repo")
             }
         }
@@ -77,9 +77,9 @@ mavenPublishing {
             }
         }
         scm {
-            url.set("https://github.com/DanielBunting/placheolder-java-clickhouse")
-            connection.set("scm:git:git://github.com/DanielBunting/placheolder-java-clickhouse.git")
-            developerConnection.set("scm:git:ssh://git@github.com/DanielBunting/placheolder-java-clickhouse.git")
+            url.set("https://github.com/DanielBunting/jvm-clickhouse-native")
+            connection.set("scm:git:git://github.com/DanielBunting/jvm-clickhouse-native.git")
+            developerConnection.set("scm:git:ssh://git@github.com/DanielBunting/jvm-clickhouse-native.git")
         }
     }
 }
