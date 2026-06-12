@@ -34,8 +34,9 @@ subprojects {
     }
 
     // Coverage: every Java module gets JaCoCo with an XML report, uploaded to
-    // Codecov by CI. Unit tests only — the integration test tasks run in
-    // separate CI jobs and don't record coverage.
+    // Codecov by CI. Two sources, merged per-commit by Codecov: the unit `test`
+    // task (jacocoTestReport, build job) and the default integrationTest run
+    // (jacocoIntegrationTestReport, integration job).
     plugins.withId("java") {
         apply(plugin = "jacoco")
         tasks.withType<JacocoReport>().configureEach {

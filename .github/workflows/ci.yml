@@ -37,6 +37,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unit
           files: clickhouse-native-client/build/reports/jacoco/test/jacocoTestReport.xml,clickhouse-native-client-jdbc/build/reports/jacoco/test/jacocoTestReport.xml,clickhouse-native-client-kotlin/build/reports/jacoco/test/jacocoTestReport.xml
 
   integration:
@@ -51,7 +52,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       # Unqualified task name runs the suite in every module that defines it
       # (client, jdbc, kotlin). Testcontainers uses the runner's Docker daemon.
-      - run: ./gradlew integrationTest
+      - run: ./gradlew integrationTest jacocoIntegrationTestReport
+      # Codecov merges this with the build job's unit-test upload for the same
+      # commit, so the dashboard number reflects both suites.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: integration
+          files: clickhouse-native-client/build/reports/jacoco/jacocoIntegrationTestReport/jacocoIntegrationTestReport.xml,clickhouse-native-client-jdbc/build/reports/jacoco/jacocoIntegrationTestReport/jacocoIntegrationTestReport.xml,clickhouse-native-client-kotlin/build/reports/jacoco/jacocoIntegrationTestReport/jacocoIntegrationTestReport.xml
 
   # Full supported-version matrix is too slow for every PR — push events only.
   # Push events fire solely for branches listed under on.push.branches, so that
