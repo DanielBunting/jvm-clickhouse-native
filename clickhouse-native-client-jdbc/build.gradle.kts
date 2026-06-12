@@ -113,6 +113,16 @@ fun registerIntegrationTest(name: String, version: String?) =
 // Run with: ./gradlew :clickhouse-native-client-jdbc:integrationTest
 val integrationTest = registerIntegrationTest("integrationTest", null)
 
+// Coverage from the default-version integration run. CI uploads this XML to
+// Codecov alongside the unit-test report; Codecov merges per-commit uploads.
+tasks.register<JacocoReport>("jacocoIntegrationTestReport") {
+    description = "Generates a coverage report from integrationTest execution data."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    dependsOn(integrationTest)
+    executionData(integrationTest.get())
+    sourceSets(sourceSets["main"])
+}
+
 // One task per supported version, e.g. integrationTest_26_4.
 val versionedIntegrationTests = supportedClickHouseVersions.map { version ->
     registerIntegrationTest("integrationTest_${version.replace('.', '_')}", version)
