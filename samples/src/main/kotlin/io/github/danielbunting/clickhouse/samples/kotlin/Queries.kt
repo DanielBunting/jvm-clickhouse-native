@@ -4,6 +4,9 @@ import io.github.danielbunting.clickhouse.samples.ClickHouseEnv
 import io.github.danielbunting.clickhouse.kotlin.command
 import io.github.danielbunting.clickhouse.kotlin.connect
 import io.github.danielbunting.clickhouse.kotlin.queryAs
+import io.github.danielbunting.clickhouse.kotlin.queryAsBatched
+import io.github.danielbunting.clickhouse.kotlin.queryBatched
+import io.github.danielbunting.clickhouse.kotlin.queryBlocks
 import io.github.danielbunting.clickhouse.kotlin.queryFlow
 import io.github.danielbunting.clickhouse.kotlin.queryParametersOf
 import io.github.danielbunting.clickhouse.kotlin.scalar
@@ -26,6 +29,9 @@ import kotlinx.coroutines.runBlocking
  *     the SQL; the server casts them against `{name:Type}` placeholders.
  *  6. Async: where Java hands the blocking call to `queryAsync`'s future, a suspend call
  *     wrapped in `async { }` gives the same handoff with structured concurrency.
+ *  7. Batched & block-granular Flows (Kotlin-only, no Java analog): `queryBatched` /
+ *     `queryAsBatched` emit fixed-size `List<T>` chunks, and `queryBlocks` emits whole
+ *     column-major blocks — fewer, larger `flowOn` handoffs than the per-row Flows.
  *
  * Run with:
  * ```
@@ -103,6 +109,35 @@ fun main(): Unit = runBlocking {
         println("\n[6] async {} (the queryAsync analog):")
         val evenIds = async { conn.scalar("SELECT count() FROM $table WHERE id % 2 = 0") }
         println("    even ids: ${evenIds.await()}")
+
+        // --------------------------------------------------------------------
+        // 7. Batched & block-granular Flows (Kotlin-only — no Java analog)
+        // --------------------------------------------------------------------
+        // Per-row queryFlow/queryAs cross the flowOn channel once per row. To cut
+        // that cost on large reads, emit fewer, larger items: queryBatched and
+        // queryAsBatched group rows into fixed-size List<T> chunks (the final chunk
+        // is the partial remainder); queryBlocks emits whole column-major blocks for
+        // zero-boxing columnar reads.
+        println("\n[7] Batched & block-granular Flows (Kotlin-only):")
+
+        // 7a. queryBatched — explicit mapper, rows grouped into chunks of <= 400.
+        conn.queryBatched("SELECT id FROM $table ORDER BY id", batchSize = 400) { it.long("id") }
+            .collect { batch ->
+                println("    queryBatched:   chunk of ${batch.size} (ids ${batch.first()}..${batch.last()})")
+            }
+
+        // 7b. queryAsBatched — same chunking, rows auto-mapped to Measurement.
+        conn.queryAsBatched<Measurement>("SELECT id, name, score FROM $table ORDER BY id", batchSize = 400)
+            .collect { batch -> println("    queryAsBatched: chunk of ${batch.size} Measurements") }
+
+        // 7c. queryBlocks — raw column-major blocks; read the primitive arrays directly.
+        conn.queryBlocks("SELECT id FROM $table ORDER BY id")
+            .collect { block ->
+                val ids = block.column(0)
+                var sum = 0L
+                for (r in 0 until block.rowCount()) sum += ids.longAt(r)
+                println("    queryBlocks:    block of ${block.rowCount()} rows, id sum=$sum")
+            }
     }
 
     println("\n=== Kotlin Queries tour complete ===")
