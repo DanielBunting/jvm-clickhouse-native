@@ -50,11 +50,15 @@ no boxing — measures wire/decode throughput and allocation.
 | clickhouse-jdbc v2 (HTTP) | 53.9 ms / 261.5 MB |
 | housepower (native) | 58.7 ms / 384.3 MB |
 
-The durable win is **16× less allocation**: v2's binary reader materialises a
-`Map`-backed record per row even behind positional getters, while our columnar
-path touches only the backing arrays. Wall clock follows from that — ~5.5× faster
-in this session — but on loopback that ratio is the noisier figure (see the
-note above on treating allocation, not absolute ms, as the durable finding).
+The headline is **16× less allocation** (261.5 → 16.0 MB): v2's binary reader
+deserialises every cell into a boxed `Object[]` per row (primitives included) and
+hands back a per-row wrapper object, so the positional getters read from that
+boxed array rather than avoiding the per-cell boxing — while our columnar path
+touches only the primitive backing arrays. That allocation gap *is* the ~5.5×
+speed gap — the boxing and the GC pressure it creates are client-side decode
+costs, not a loopback artifact, so unlike the *insert* wall-clock numbers (where
+removing the network flattens single-client time to a tie) this read speedup is a
+real, structural difference.
 
 ## Materialised typed reads — 1M rows → objects (`MappedSelectBenchmark`)
 
