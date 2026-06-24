@@ -39,9 +39,10 @@ import java.util.concurrent.TimeUnit;
  *       drop sharply versus {@code ours_native_all}.</li>
  * </ul>
  *
- * <p>For a complete head-to-head, the official ClickHouse JDBC (HTTP) and HousePower
- * native JDBC drivers run the same two SELECTs ({@code clickhouseJavaHttp_all/_projected},
- * {@code housepowerNative_all/_projected}), consumed via {@code rs.getString(...).length()}
+ * <p>For a complete head-to-head, the official v2-based JDBC driver, the official
+ * {@code client-v2} API, and the HousePower native JDBC driver run the same two SELECTs
+ * ({@code clickhouseJavaV2Jdbc_all/_projected}, {@code clickhouseJavaV2Client_all/_projected},
+ * {@code housepowerNative_all/_projected}), consumed via {@code getString(...).length()}
  * to match the native methods' {@code stringAt(r).length()} semantics.
  *
  * <p>Run with the {@code gc} profiler (configured in the module's {@code jmh} block) to
@@ -70,8 +71,11 @@ public class StringSelectBenchmark {
     private ClickHouseResource resource;
     private ClickHouseConnection nativeConn;
 
-    /** Official ClickHouse JDBC connection (HTTP transport, port 8123). */
+    /** Official v2-based JDBC connection (HTTP transport, port 8123). */
     private java.sql.Connection httpConn;
+
+    /** Official client-v2 API client (HTTP transport, port 8123). */
+    private com.clickhouse.client.api.Client v2Client;
 
     /** HousePower native JDBC connection (native TCP, port 9000). */
     private java.sql.Connection hpConn;
@@ -123,6 +127,7 @@ public class StringSelectBenchmark {
         Properties props = resource.competitorProps();
         httpConn = new com.clickhouse.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.httpPort() + "/default", props);
+        v2Client = resource.openV2Client();
         hpConn = new com.github.housepower.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.nativePort() + "/default", props);
     }
@@ -134,6 +139,9 @@ public class StringSelectBenchmark {
         }
         if (httpConn != null) {
             httpConn.close();
+        }
+        if (v2Client != null) {
+            v2Client.close();
         }
         if (hpConn != null) {
             hpConn.close();
@@ -209,15 +217,27 @@ public class StringSelectBenchmark {
     }
 
     /**
-     * Official {@code clickhouse-jdbc} (HTTP) reading every string column — the
+     * Official v2-based JDBC driver (HTTP) reading every string column — the
      * head-to-head counterpart of {@link #ours_native_all}.
      *
      * @param bh JMH blackhole
      * @throws Exception on query failure
      */
     @Benchmark
-    public void clickhouseJavaHttp_all(Blackhole bh) throws Exception {
+    public void clickhouseJavaV2Jdbc_all(Blackhole bh) throws Exception {
         sumAllStrings(httpConn, bh);
+    }
+
+    /**
+     * Official {@code client-v2} API reading every string column through its
+     * binary reader — the head-to-head counterpart of {@link #ours_native_all}.
+     *
+     * @param bh JMH blackhole
+     * @throws Exception on query failure
+     */
+    @Benchmark
+    public void clickhouseJavaV2Client_all(Blackhole bh) throws Exception {
+        sumAllStringsV2(selectAllSql, STRING_COLUMNS, bh);
     }
 
     /**
@@ -233,15 +253,27 @@ public class StringSelectBenchmark {
     }
 
     /**
-     * Official {@code clickhouse-jdbc} (HTTP) reading only the projected column — the
+     * Official v2-based JDBC driver (HTTP) reading only the projected column — the
      * head-to-head counterpart of {@link #ours_native_projected}.
      *
      * @param bh JMH blackhole
      * @throws Exception on query failure
      */
     @Benchmark
-    public void clickhouseJavaHttp_projected(Blackhole bh) throws Exception {
+    public void clickhouseJavaV2Jdbc_projected(Blackhole bh) throws Exception {
         sumProjectedString(httpConn, bh);
+    }
+
+    /**
+     * Official {@code client-v2} API reading only the projected column through its
+     * binary reader — the head-to-head counterpart of {@link #ours_native_projected}.
+     *
+     * @param bh JMH blackhole
+     * @throws Exception on query failure
+     */
+    @Benchmark
+    public void clickhouseJavaV2Client_projected(Blackhole bh) throws Exception {
+        sumAllStringsV2(selectOneSql, 1, bh);
     }
 
     /**
@@ -267,6 +299,25 @@ public class StringSelectBenchmark {
             while (rs.next()) {
                 for (int c = 1; c <= STRING_COLUMNS; c++) {
                     lenSum += rs.getString(c).length();
+                }
+            }
+            bh.consume(lenSum);
+        }
+    }
+
+    /**
+     * Reads {@code columns} string columns via the client-v2 binary reader, summing
+     * their lengths to mirror the {@code ours_native_*} consumption semantics.
+     */
+    private void sumAllStringsV2(String sql, int columns, Blackhole bh) throws Exception {
+        try (com.clickhouse.client.api.query.QueryResponse response = v2Client.query(sql).get()) {
+            com.clickhouse.client.api.data_formats.ClickHouseBinaryFormatReader reader =
+                    v2Client.newBinaryFormatReader(response);
+            long lenSum = 0;
+            while (reader.hasNext()) {
+                reader.next();
+                for (int c = 1; c <= columns; c++) {
+                    lenSum += reader.getString(c).length();
                 }
             }
             bh.consume(lenSum);

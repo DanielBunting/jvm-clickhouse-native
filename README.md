@@ -230,53 +230,78 @@ Runnable end-to-end demos live in [`samples/`](samples/). All honor `CH_HOST`, `
 
 ## Performance
 
-JMH benchmarks against the official `clickhouse-jdbc` 0.6.5 (HTTP transport) and HousePower `clickhouse-native-jdbc` 2.7.1 (native TCP), reading/writing a 1M-row table. Lower is better; **bold** marks the best value per column. Allocation is `gc.alloc.rate.norm` per operation.
+JMH benchmarks against the official Java driver 0.9.0 — both its v2 JDBC driver (`clickhouse-jdbc`, HTTP) and its idiomatic `client-v2` API — and HousePower `clickhouse-native-jdbc` 2.7.1 (native TCP), reading/writing a 1M-row table. Lower is better; **bold** marks the best value per column. Allocation is `gc.alloc.rate.norm` per operation.
 
 ### Streaming read — 1M rows (columnar access)
 
 | Driver | Time | Alloc / op |
 |---|---|---|
-| **jvm-clickhouse-native** | **9.2 ms** | 16.0 MB |
-| clickhouse-jdbc (HTTP) | 33.0 ms | **7.1 MB** |
-| housepower (native) | 62.4 ms | 384.3 MB |
+| **jvm-clickhouse-native** | **8.9 ms** | **16.0 MB** |
+| client-v2 (binary reader) | 49.2 ms | 261.5 MB |
+| clickhouse-jdbc v2 (HTTP) | 53.9 ms | 261.5 MB |
+| housepower (native) | 58.7 ms | 384.3 MB |
 
 ### Typed mapping — 1M rows → objects
 
 | Driver | Time | Alloc / op |
 |---|---|---|
-| **jvm-clickhouse-native** (`query(sql, Class)`) | **28.9 ms** | 144.0 MB |
-| clickhouse-jdbc (HTTP) | 34.0 ms | **39.2 MB** |
-| housepower (native) | 65.2 ms | 416.3 MB |
+| **jvm-clickhouse-native** (`query(sql, Class)`) | **27.6 ms** | **144.0 MB** |
+| client-v2 (binary reader → record) | 49.2 ms | 293.5 MB |
+| clickhouse-jdbc v2 (HTTP) | 54.2 ms | 293.5 MB |
+| housepower (native) | 57.0 ms | 416.3 MB |
 
 ### String-heavy read — 1M rows
 
-| Driver | All columns | Projected (2 cols) |
+| Driver | All columns (8) | Projected (1 of 8) |
 |---|---|---|
-| jvm-clickhouse-native | 238.0 ms / 1.58 GB | 32.7 ms / 197.6 MB |
-| clickhouse-jdbc (HTTP) | **162.8 ms / 0.67 GB** | **24.6 ms / 84.2 MB** |
-| housepower (native) | 234.9 ms / 2.42 GB | 32.9 ms / 303.0 MB |
+| jvm-clickhouse-native | 240.2 ms / 1.58 GB | **29.0 ms** / 197.6 MB |
+| client-v2 (binary reader) | **229.1 ms / 0.81 GB** | 33.0 ms / 177.0 MB |
+| clickhouse-jdbc v2 (HTTP) | 257.0 ms / 0.81 GB | 32.6 ms / **176.9 MB** |
+| housepower (native) | 237.9 ms / 2.42 GB | 31.5 ms / 303.0 MB |
 
-> The all-columns string-materialization case is currently a known loss against the official HTTP driver — lazy string decoding pays off when you don't touch every string cell, and we're working on the full-materialization path.
+> The all-columns string-materialization case is a statistical tie on time with the official driver but a known loss on allocation — lazy string decoding pays off when you don't touch every string cell, and we're working on the full-materialization path.
 
 ### Bulk insert — 1M rows
 
 | Driver | Time | Alloc / op |
 |---|---|---|
-| **jvm-clickhouse-native** (LZ4) | **0.122 s** | 101.6 MB |
-| jvm-clickhouse-native (Zstd) | 0.126 s | 82.7 MB |
-| jvm-clickhouse-native (none) | 0.160 s | **58.4 MB** |
-| housepower (native) | 0.166 s | 770.5 MB |
-| clickhouse-jdbc (HTTP) | 0.266 s | 970.9 MB |
+| **jvm-clickhouse-native** (LZ4) | **0.116 s** | 101.6 MB |
+| client-v2 (POJO insert) | 0.121 s | 385.3 MB |
+| jvm-clickhouse-native (Zstd) | 0.124 s | 82.7 MB |
+| housepower (native) | 0.178 s | 770.5 MB |
+| jvm-clickhouse-native (none) | 0.228 s¹ | **58.4 MB** |
+| clickhouse-jdbc v1 (legacy, HTTP) | 0.257 s | 971.0 MB |
+| clickhouse-jdbc v2 (HTTP) | 1.154 s² | 2.33 GB |
 
-~1.4× faster than the fastest competitor with **7–10× less allocation**.
+¹ One outlier iteration (±2.4 s CI over 3 iterations); adjacent runs measure ~0.11 s.
+² The v2 JDBC batch path is a known regression over both v1 and its own `client-v2` underpinnings — and requires backtick-quoting the `user` column to avoid an even slower client-side parser fallback (see `BulkInsertBenchmark` javadoc).
+
+Against `client-v2` — the official driver's fastest insert path — single-client wall clock on loopback is a statistical tie; the durable differences are **~4× less allocation** here and the native wire format's lower server-side cost (no row→column transpose).
+
+### Wide bulk insert — 1M rows × 30 fixed-width columns
+
+Per-cell costs (the server's row→column transpose for row-major formats, per-cell dispatch in row-shaped driver APIs) scale with column count, so a 30-column numeric table (`bench_wide`: 15 × UInt64 + 15 × Float64, 240 raw B/row — no strings, so UTF-8 work doesn't mask the format difference) separates the drivers far more than the 5-column table:
+
+| Driver | Time | Alloc / op |
+|---|---|---|
+| **jvm-clickhouse-native** (none) | 1.43 s¹ | **16.3 MB** |
+| jvm-clickhouse-native (LZ4) | 1.21 s | 378.2 MB |
+| client-v2 (POJO insert) | 1.23 s | 1.92 GB |
+| clickhouse-jdbc v1 (legacy, HTTP) | 0.97 s¹ | 977.2 MB |
+| housepower (native) | 1.58 s | 4.99 GB |
+| clickhouse-jdbc v2 (HTTP) | 3.33 s | 3.97 GB |
+
+¹ Wall-clock CIs are wide at this payload size (±2 s over 3 iterations) — treat time ordering among the top four as a tie; the allocation column (tight CIs) is the reliable signal. On a pure-numeric schema our column buffers produce almost no garbage: **16 MB vs 1.9–5.0 GB** for the row-API drivers (~120–300×).
+
+Server-side accounting for the same inserts (`system.query_log`, via the `InsertBreakdown` diagnostic in the benchmarks module): native blocks cost the server **569 ms CPU** per 1M wide rows vs **777 ms** for client-v2's RowBinary (+37% row→column transpose tax, up from +15–50 ms on the narrow table) and **1,559 ms** for v2 JDBC. Native-protocol clients fully pipeline (client wall ≈ server duration); the HTTP JDBC paths serialize-then-ship, stacking client and server time.
 
 ### Kotlin Flow overhead — 1M-row read (ours only)
 
 | API | Time | Alloc / op |
 |---|---|---|
-| Java columnar blocks | **10.3 ms** | 16.0 MB |
-| Java `query(sql, Class)` | 31.2 ms | 144.0 MB |
-| Kotlin `queryFlow` | 174.0 ms | 83.1 MB |
+| Java columnar blocks | **9.4 ms** | 16.0 MB |
+| Java `query(sql, Class)` | 27.9 ms | 144.0 MB |
+| Kotlin `queryFlow` | 178.2 ms | 83.8 MB |
 
 Per-row `Flow` emission has real overhead; for hot paths, read columnar blocks and wrap your own batching.
 
@@ -284,10 +309,10 @@ Per-row `Flow` emission has real overhead; for hot paths, read columnar blocks a
 
 - Apple M5, 24 GB RAM, macOS 26.5.1; OpenJDK 17.0.18 (Homebrew)
 - ClickHouse `clickhouse/clickhouse-server:25.8` in Docker (localhost loopback — network cost is minimized, protocol/allocation cost dominates)
-- JMH 2 warmup + 3 measurement iterations, 1 fork, `-prof gc`; 1M-row table, June 2026 run
-- Drivers: this client (built from `main`, June 2026), `com.clickhouse:clickhouse-jdbc:0.6.5`, `com.github.housepower:clickhouse-native-jdbc:2.7.1`
+- JMH 2 warmup + 3 measurement iterations, 1 fork, `-prof gc`; 1M-row table, June 2026 run (all tables from a single session)
+- Drivers: this client (built from `main`, June 2026), `com.clickhouse:clickhouse-jdbc:0.9.0` (v2 JDBC; legacy v1 via its bundled `DriverV1`), `com.clickhouse:client-v2:0.9.0`, `com.github.housepower:clickhouse-native-jdbc:2.7.1`
 
-Reproduce with `./gradlew :benchmarks:jmh` (requires Docker) — see [`benchmarks/`](benchmarks/).
+Reproduce with `./gradlew :benchmarks:jmh` (requires Docker) — see [`benchmarks/`](benchmarks/). Full matrix (v1/v2 JDBC, client-v2, HousePower, wide tables, and a client-vs-server time split) in [docs/performance-comparison.md](docs/performance-comparison.md).
 
 ## Requirements
 

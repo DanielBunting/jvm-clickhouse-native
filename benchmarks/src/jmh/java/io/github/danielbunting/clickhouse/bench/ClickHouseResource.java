@@ -142,6 +142,21 @@ public class ClickHouseResource {
     }
 
     /**
+     * Opens an official {@code client-v2} client ({@code com.clickhouse.client.api.Client},
+     * HTTP transport) against the server under test.
+     *
+     * @return a freshly built client; the caller owns it and must close it
+     */
+    public com.clickhouse.client.api.Client openV2Client() {
+        return new com.clickhouse.client.api.Client.Builder()
+                .addEndpoint("http://" + host + ":" + httpPort)
+                .setUsername("default")
+                .setPassword("")
+                .setDefaultDatabase("default")
+                .build();
+    }
+
+    /**
      * Builds the JDBC connection properties for the competitor drivers
      * ({@code default} user, empty password).
      *
