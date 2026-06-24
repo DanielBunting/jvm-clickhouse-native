@@ -102,7 +102,8 @@ dependencies {
     // Cross-client round-trip ITs (CrossClient*IT): the official ClickHouse JDBC
     // driver (0.8+ is built on client-v2; HTTP, port 8123) acts as the reference
     // implementation. Test-only — never leaks into the published library. The
-    // benchmarks module pins the old 0.6.5 line separately for comparability.
+    // benchmarks module uses the same 0.9.0 line (v2 JDBC + client-v2, plus the
+    // bundled legacy DriverV1 for the generational bulk-insert comparison).
     testImplementation("com.clickhouse:clickhouse-jdbc:0.9.0")
 }
 

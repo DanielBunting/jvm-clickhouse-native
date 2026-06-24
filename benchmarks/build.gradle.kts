@@ -22,12 +22,14 @@ dependencies {
     // Shared test-only helpers (e.g. ClickHouseImages) from clickhouse-native-client's test fixtures.
     jmh(testFixtures(project(":clickhouse-native-client")))
     // Competitors for the head-to-head comparison table.
-    // Official driver, HTTP (port 8123). The ':all' shaded jar omits the client SPI
-    // (com.clickhouse.client.ClickHouseClient), so use the modular artifacts: jdbc +
-    // client (the SPI) + http-client (the transport impl, found via ServiceLoader).
-    jmh("com.clickhouse:clickhouse-jdbc:0.6.5")
-    jmh("com.clickhouse:clickhouse-client:0.6.5")
-    jmh("com.clickhouse:clickhouse-http-client:0.6.5")
+    // Official driver stack, HTTP (port 8123), one aligned version. clickhouse-jdbc
+    // 0.9.x ships BOTH generations: com.clickhouse.jdbc.ClickHouseDriver (the v2
+    // rewrite, built on client-v2) and com.clickhouse.jdbc.DriverV1 (the legacy
+    // implementation, with clickhouse-client + clickhouse-http-client pulled in
+    // transitively for its ServiceLoader SPI). client-v2 is declared explicitly so
+    // the benchmarks can compile against its com.clickhouse.client.api.Client API.
+    jmh("com.clickhouse:clickhouse-jdbc:0.9.0")
+    jmh("com.clickhouse:client-v2:0.9.0")
     jmh("com.github.housepower:clickhouse-native-jdbc:2.7.1")    // community, native TCP (port 9000)
     // Spin a real ClickHouse for the benchmark harness (override with -Dch.host).
     jmh("org.testcontainers:testcontainers:1.21.4")

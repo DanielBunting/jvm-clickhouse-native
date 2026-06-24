@@ -34,10 +34,11 @@ import java.util.stream.Stream;
  * this reports bytes allocated per operation, validating the allocation win versus the
  * previous "materialize the whole result into a {@code List<T>}" implementation.
  *
- * <p>For a complete head-to-head, the official ClickHouse JDBC (HTTP) and HousePower
- * native JDBC drivers run the same SELECT ({@code clickhouseJavaHttp}, {@code housepowerNative}),
- * building one {@link MappedRow} per row from the {@code ResultSet} so each driver produces
- * the same materialised objects our mapper does.
+ * <p>For a complete head-to-head, the official v2-based JDBC driver, the official
+ * {@code client-v2} API, and the HousePower native JDBC driver run the same SELECT
+ * ({@code clickhouseJavaV2Jdbc}, {@code clickhouseJavaV2Client}, {@code housepowerNative}),
+ * building one {@link MappedRow} per row so each driver produces the same materialised
+ * objects our mapper does.
  *
  * <p>Setup mirrors {@link StreamingSelectBenchmark}: one million rows are inserted once
  * per trial via our bulk inserter, and the shared {@link ClickHouseResource} (honoring
@@ -70,8 +71,11 @@ public class MappedSelectBenchmark {
     /** Reusable native connection (no compression to keep comparisons fair). */
     private ClickHouseConnection nativeConn;
 
-    /** Official ClickHouse JDBC connection (HTTP transport, port 8123). */
+    /** Official v2-based JDBC connection (HTTP transport, port 8123). */
     private java.sql.Connection httpConn;
+
+    /** Official client-v2 API client (HTTP transport, port 8123). */
+    private com.clickhouse.client.api.Client v2Client;
 
     /** HousePower native JDBC connection (native TCP, port 9000). */
     private java.sql.Connection hpConn;
@@ -104,6 +108,7 @@ public class MappedSelectBenchmark {
         Properties props = resource.competitorProps();
         httpConn = new com.clickhouse.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.httpPort() + "/default", props);
+        v2Client = resource.openV2Client();
         hpConn = new com.github.housepower.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.nativePort() + "/default", props);
     }
@@ -120,6 +125,9 @@ public class MappedSelectBenchmark {
         }
         if (httpConn != null) {
             httpConn.close();
+        }
+        if (v2Client != null) {
+            v2Client.close();
         }
         if (hpConn != null) {
             hpConn.close();
@@ -144,15 +152,38 @@ public class MappedSelectBenchmark {
     }
 
     /**
-     * Official {@code clickhouse-jdbc} (HTTP) head-to-head: build one {@link MappedRow}
+     * Official v2-based JDBC driver (HTTP) head-to-head: build one {@link MappedRow}
      * per result row via the {@code ResultSet} getters, mirroring our mapper's output.
      *
      * @param bh JMH {@link Blackhole} used to prevent dead-code elimination
      * @throws Exception if the query or result-set iteration fails
      */
     @Benchmark
-    public void clickhouseJavaHttp(Blackhole bh) throws Exception {
+    public void clickhouseJavaV2Jdbc(Blackhole bh) throws Exception {
         mapRows(httpConn, bh);
+    }
+
+    /**
+     * Official {@code client-v2} API head-to-head: build one {@link MappedRow} per
+     * row from the binary (RowBinaryWithNamesAndTypes) reader's positional getters.
+     * client-v2's own POJO read path ({@code queryAll(sql, Class, schema)}) needs
+     * setter-based beans, so constructing the record from the reader is its closest
+     * equivalent of our {@code query(sql, Class)} mapper.
+     *
+     * @param bh JMH {@link Blackhole} used to prevent dead-code elimination
+     * @throws Exception if the query or reader iteration fails
+     */
+    @Benchmark
+    public void clickhouseJavaV2Client(Blackhole bh) throws Exception {
+        try (com.clickhouse.client.api.query.QueryResponse response =
+                v2Client.query(SELECT_SQL).get()) {
+            com.clickhouse.client.api.data_formats.ClickHouseBinaryFormatReader reader =
+                    v2Client.newBinaryFormatReader(response);
+            while (reader.hasNext()) {
+                reader.next();
+                bh.consume(new MappedRow(reader.getLong(1), reader.getDouble(2)));
+            }
+        }
     }
 
     /**

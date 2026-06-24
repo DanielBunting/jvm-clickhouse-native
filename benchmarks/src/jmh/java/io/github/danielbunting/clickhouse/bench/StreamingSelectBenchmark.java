@@ -25,10 +25,12 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * JMH benchmark that fully consumes a large SELECT via three drivers:
+ * JMH benchmark that fully consumes a large SELECT via four driver paths:
  * <ol>
  *   <li>Our native client ({@code ours_native}) – block-streaming, low-allocation path.</li>
- *   <li>Official ClickHouse JDBC over HTTP ({@code clickhouseJavaHttp}).</li>
+ *   <li>Official v2-based JDBC driver over HTTP ({@code clickhouseJavaV2Jdbc}).</li>
+ *   <li>Official {@code client-v2} API directly ({@code clickhouseJavaV2Client}),
+ *       streaming through its RowBinaryWithNamesAndTypes reader.</li>
  *   <li>HousePower native JDBC ({@code housepowerNative}).</li>
  * </ol>
  *
@@ -64,8 +66,11 @@ public class StreamingSelectBenchmark {
     /** Reusable native connection (no compression to keep comparisons fair). */
     private ClickHouseConnection nativeConn;
 
-    /** Official ClickHouse JDBC connection (HTTP transport, port 8123). */
+    /** Official v2-based JDBC connection (HTTP transport, port 8123). */
     private java.sql.Connection httpConn;
+
+    /** Official client-v2 API client (HTTP transport, port 8123). */
+    private com.clickhouse.client.api.Client v2Client;
 
     /** HousePower native JDBC connection (native TCP, port 9000). */
     private java.sql.Connection hpConn;
@@ -107,6 +112,8 @@ public class StreamingSelectBenchmark {
         httpConn = new com.clickhouse.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.httpPort() + "/default", props);
 
+        v2Client = resource.openV2Client();
+
         hpConn = new com.github.housepower.jdbc.ClickHouseDriver()
                 .connect("jdbc:clickhouse://" + resource.host() + ":" + resource.nativePort() + "/default", props);
     }
@@ -124,6 +131,9 @@ public class StreamingSelectBenchmark {
         }
         if (httpConn != null) {
             httpConn.close();
+        }
+        if (v2Client != null) {
+            v2Client.close();
         }
         if (hpConn != null) {
             hpConn.close();
@@ -180,7 +190,8 @@ public class StreamingSelectBenchmark {
     }
 
     /**
-     * Streams all rows using the official {@code clickhouse-jdbc} driver over HTTP.
+     * Streams all rows using the official v2-based JDBC driver
+     * ({@code com.clickhouse.jdbc.ClickHouseDriver}, built on client-v2) over HTTP.
      *
      * <p>The driver is instantiated directly (not via {@link java.sql.DriverManager})
      * to avoid URL-scheme conflicts with HousePower.
@@ -189,12 +200,36 @@ public class StreamingSelectBenchmark {
      * @throws Exception if the query or result-set iteration fails
      */
     @Benchmark
-    public void clickhouseJavaHttp(Blackhole bh) throws Exception {
+    public void clickhouseJavaV2Jdbc(Blackhole bh) throws Exception {
         try (Statement stmt = httpConn.createStatement();
              ResultSet rs   = stmt.executeQuery(SELECT_SQL)) {
             while (rs.next()) {
                 bh.consume(rs.getLong(1));
                 bh.consume(rs.getDouble(2));
+            }
+        }
+    }
+
+    /**
+     * Streams all rows using the official {@code client-v2} API directly: a
+     * {@code QueryResponse} consumed through its binary
+     * (RowBinaryWithNamesAndTypes) reader with positional primitive getters —
+     * the official driver's lowest-overhead read path and the closest analog
+     * to {@link #ours_native}.
+     *
+     * @param bh JMH {@link Blackhole} to prevent dead-code elimination
+     * @throws Exception if the query or reader iteration fails
+     */
+    @Benchmark
+    public void clickhouseJavaV2Client(Blackhole bh) throws Exception {
+        try (com.clickhouse.client.api.query.QueryResponse response =
+                v2Client.query(SELECT_SQL).get()) {
+            com.clickhouse.client.api.data_formats.ClickHouseBinaryFormatReader reader =
+                    v2Client.newBinaryFormatReader(response);
+            while (reader.hasNext()) {
+                reader.next();
+                bh.consume(reader.getLong(1));
+                bh.consume(reader.getDouble(2));
             }
         }
     }

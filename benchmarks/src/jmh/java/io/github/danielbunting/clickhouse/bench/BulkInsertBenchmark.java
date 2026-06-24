@@ -32,8 +32,13 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>{@code clickhouse-native-client} (this project) with LZ4, ZSTD and no
  *       compression, using its native {@link BulkInserter};</li>
- *   <li>the official {@code com.clickhouse:clickhouse-jdbc} driver over
- *       HTTP (port 8123);</li>
+ *   <li>the official {@code com.clickhouse:clickhouse-jdbc} driver over HTTP
+ *       (port 8123), in both generations shipped by 0.9.x: the legacy v1
+ *       implementation ({@code com.clickhouse.jdbc.DriverV1}) and the v2 rewrite
+ *       ({@code com.clickhouse.jdbc.ClickHouseDriver}, built on client-v2);</li>
+ *   <li>the official {@code com.clickhouse:client-v2} API directly
+ *       ({@code com.clickhouse.client.api.Client}), i.e. the idiomatic non-JDBC
+ *       bulk path with schema-compiled POJO serializers;</li>
  *   <li>the {@code com.github.housepower:clickhouse-native-jdbc} driver over
  *       the native protocol (port 9000).</li>
  * </ul>
@@ -66,6 +71,13 @@ public class BulkInsertBenchmark {
     /** Pre-generated synthetic dataset shared across all benchmark methods. */
     private List<BenchRow> data;
 
+    /**
+     * The same dataset as JavaBeans for the client-v2 POJO path, whose
+     * serializer registration requires bean-style getters (see {@link BenchRowBean}).
+     * Converted once per trial so the conversion is not measured.
+     */
+    private List<BenchRowBean> beanData;
+
     /** Connection properties for the competitor JDBC drivers. */
     private Properties competitorProps;
 
@@ -79,6 +91,7 @@ public class BulkInsertBenchmark {
     public void setUpTrial() throws Exception {
         resource.setUp();
         this.data = SyntheticData.generate(rows);
+        this.beanData = data.stream().map(BenchRowBean::new).toList();
         this.competitorProps = resource.competitorProps();
     }
 
@@ -163,17 +176,68 @@ public class BulkInsertBenchmark {
     // ------------------------------------------------------------------
 
     /**
-     * Inserts the dataset using the official {@code com.clickhouse:clickhouse-jdbc}
-     * driver over HTTP via a batched {@link PreparedStatement}.
+     * Inserts the dataset using the official driver's <b>legacy v1</b> JDBC
+     * implementation ({@code com.clickhouse.jdbc.DriverV1}) over HTTP via a
+     * batched {@link PreparedStatement}.
+     *
+     * <p>On {@code executeBatch()} the v1 {@code InputBasedPreparedStatement}
+     * streams the whole batch as a single RowBinary HTTP INSERT, going through
+     * the generic {@code ClickHouseValue} layer per cell. This is the same code
+     * path previously benchmarked as {@code clickhouseJavaHttp} against
+     * {@code clickhouse-jdbc:0.6.5}.</p>
      *
      * @param bh JMH sink that consumes the inserted row count
      * @throws Exception if the JDBC insert fails
      */
     @Benchmark
-    public void clickhouseJavaHttp(Blackhole bh) throws Exception {
+    public void clickhouseJavaV1Http(Blackhole bh) throws Exception {
+        String url = "jdbc:clickhouse://" + resource.host() + ":" + resource.httpPort() + "/default";
+        try (Connection conn = new com.clickhouse.jdbc.DriverV1().connect(url, competitorProps)) {
+            bh.consume(insertJdbc(conn));
+        }
+    }
+
+    /**
+     * Inserts the dataset using the official driver's <b>v2</b> JDBC
+     * implementation ({@code com.clickhouse.jdbc.ClickHouseDriver}, the default
+     * since 0.8.0, built on client-v2) over HTTP via a batched
+     * {@link PreparedStatement}.
+     *
+     * @param bh JMH sink that consumes the inserted row count
+     * @throws Exception if the JDBC insert fails
+     */
+    @Benchmark
+    public void clickhouseJavaV2Jdbc(Blackhole bh) throws Exception {
         String url = "jdbc:clickhouse://" + resource.host() + ":" + resource.httpPort() + "/default";
         try (Connection conn = new com.clickhouse.jdbc.ClickHouseDriver().connect(url, competitorProps)) {
             bh.consume(insertJdbc(conn));
+        }
+    }
+
+    /**
+     * Inserts the dataset using the official {@code com.clickhouse:client-v2}
+     * API directly: {@code register(Class, TableSchema)} compiles per-column
+     * POJO serializers once, then {@code insert(table, List)} streams the rows
+     * as one RowBinary HTTP INSERT. This is the official driver's idiomatic
+     * (non-JDBC) bulk path and the closest analog to this project's
+     * {@link BulkInserter}.
+     *
+     * <p>Client construction, schema fetch and serializer compilation are
+     * inside the measured region, mirroring the other variants which also open
+     * their connection (and, for the native client, run the schema exchange)
+     * per invocation.</p>
+     *
+     * @param bh JMH sink that consumes the inserted row count
+     * @throws Exception if the insert fails
+     */
+    @Benchmark
+    public void clickhouseJavaV2Client(Blackhole bh) throws Exception {
+        try (com.clickhouse.client.api.Client client = resource.openV2Client()) {
+            client.register(BenchRowBean.class, client.getTableSchema(SyntheticData.TABLE));
+            try (com.clickhouse.client.api.insert.InsertResponse response =
+                    client.insert(SyntheticData.TABLE, beanData).get()) {
+                bh.consume(response.getWrittenRows());
+            }
         }
     }
 
@@ -198,15 +262,21 @@ public class BulkInsertBenchmark {
     }
 
     /**
-     * Shared JDBC insert path used by both competitor drivers: prepares the
+     * Shared JDBC insert path used by all competitor JDBC drivers: prepares the
      * canonical insert statement and submits every row as one batch.
+     *
+     * <p>The {@code user} column is backtick-quoted because the v2 JDBC driver's
+     * client-side ANTLR parser rejects it bare ({@code mismatched input 'user'})
+     * and silently falls back to a far slower insert path (~1.5 s and ~2.3 GB
+     * allocated per 1M rows vs ~1.0 s quoted, measured against 0.9.0). The server
+     * itself accepts the unquoted form; quoting is a no-op for the other drivers.</p>
      *
      * @param conn an open JDBC connection to the {@code default} database
      * @return the number of rows inserted
      * @throws Exception if statement preparation or execution fails
      */
     private long insertJdbc(Connection conn) throws Exception {
-        String sql = "INSERT INTO bench (id,ts,user,value,status) VALUES (?,?,?,?,?)";
+        String sql = "INSERT INTO bench (id,ts,`user`,value,status) VALUES (?,?,?,?,?)";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (BenchRow row : data) {
                 ps.setLong(1, row.id());
