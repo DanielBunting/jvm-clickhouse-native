@@ -8,7 +8,7 @@
 | [Data types](data-types.md) | Every ClickHouse ↔ JVM type mapping, accessors, null handling, insert binding |
 | [Bulk insert](bulk-insert.md) | High-throughput columnar writes: lifecycle, mapping, batch sizing, failure semantics |
 | [Connection pooling](connection-pooling.md) | Concurrency, validation, self-healing, sizing |
-| [Kotlin extensions](kotlin.md) | Coroutines, `Flow` streaming, `queryAs`, config DSL |
+| [Kotlin extensions](kotlin.md) | Coroutines, `Flow` streaming, `queryAs`, batched/block-granular flows, config DSL |
 | [JDBC driver](jdbc.md) | `jdbc:chnative://` usage, prepared statements, batches, limitations |
 | [Cross-client compatibility](cross-client-compatibility.md) | Verified round-trip behavior against the official JDBC driver across ClickHouse 25.8–26.5 |
 | [Performance comparison](performance-comparison.md) | Full benchmark matrix vs the official driver (v1/v2 JDBC + client-v2) and HousePower, with a client-vs-server time split |

@@ -49,7 +49,7 @@ Full walkthrough (table, insert, typed reads): [docs/quickstart.md](docs/quickst
 - **Failover & load balancing** — multi-endpoint configs with `FIRST_ALIVE`, `ROUND_ROBIN`, `RANDOM` policies
 - **TLS / mTLS / tokens** — trust stores, client certificates, access-token auth
 - **JDBC 4.3 driver** — `jdbc:chnative://`, prepared statements, multi-row batch collapse
-- **Kotlin coroutines** — suspend functions, `Flow` streaming, config DSL, `Flow`-sourced bulk insert
+- **Kotlin coroutines** — suspend functions, `Flow` streaming (per-row, batched `List<T>`, or whole blocks), config DSL, `Flow`-sourced bulk insert
 - **50+ ClickHouse types** — through `Variant`, `Dynamic`, `JSON`, and Geo
 - **Cross-client tested** — round-trip compatibility with the official JDBC driver verified on ClickHouse 25.8–26.5
 
