@@ -185,12 +185,17 @@ defaults are a network-bandwidth trade, not a universal win.
 
 | API | Time / Alloc |
 |---|---|
-| Java columnar blocks | **9.4 ms** / **16.0 MB** |
-| Java `query(sql, Class)` | 27.9 ms / 144.0 MB |
-| Kotlin `queryFlow` | 178.2 ms / 83.8 MB |
+| Java columnar blocks | **9.2 ms** / **16.0 MB** |
+| Kotlin `queryBatched` (100k batches) | 18.0 ms / 76.4 MB |
+| Java `query(sql, Class)` | 28.8 ms / 144.0 MB |
+| Kotlin `queryFlow` (per-row) | 181.5 ms / 83.1 MB |
 
-Per-row `Flow` emission has real overhead; for hot paths, read columnar blocks
-and batch yourself.
+Per-row `Flow` overhead is almost entirely the per-element `flowOn` channel
+handoff, not decoding or allocation (the per-row lane allocates *less* than the Java
+mapped `Stream`, yet runs 6× slower). `queryBatched(sql, batchSize) { … }` emits
+fixed-size `List<T>` chunks (partial final chunk), crossing that channel once per
+batch instead of once per row — **~10× faster** than per-row `queryFlow` at 100k.
+For raw columnar throughput, `queryBlocks(sql)` emits whole blocks.
 
 ## Reproducing
 

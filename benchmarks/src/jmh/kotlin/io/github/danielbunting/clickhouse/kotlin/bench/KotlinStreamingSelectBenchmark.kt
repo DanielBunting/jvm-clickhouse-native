@@ -6,6 +6,7 @@ import io.github.danielbunting.clickhouse.bench.ClickHouseResource
 import io.github.danielbunting.clickhouse.bench.SyntheticData
 import io.github.danielbunting.clickhouse.compress.CompressionMethod
 import io.github.danielbunting.clickhouse.kotlin.query
+import io.github.danielbunting.clickhouse.kotlin.queryBatched
 import io.github.danielbunting.clickhouse.protocol.Block
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
@@ -27,18 +28,24 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Quantifies the cost of the Kotlin coroutine/Flow streaming layer relative to the Java core, on
- * the same 1M-row `bench` dataset the other benchmarks use. Three lanes read the identical SELECT:
+ * the same 1M-row `bench` dataset the other benchmarks use. Four lanes read the identical SELECT:
  *
- *  - [ours_kotlin_flow]   — the new `query(sql) { mapper }` Flow path → one object per row,
- *                           collected under `runBlocking` (how a caller actually consumes it).
- *  - [ours_java_mapped]   — the Java row-oriented baseline: `query(sql, Class<T>)` lazy mapped
- *                           `Stream` → one object per row. Apples-to-apples with the Flow lane.
- *  - [ours_java_columnar] — the Java zero-boxing column-major path: read the primitive backing
- *                           arrays directly. The ceiling the row-oriented APIs trade away.
+ *  - [ours_kotlin_flow]         — the per-row `query(sql) { mapper }` Flow path → one object per
+ *                                 row, collected under `runBlocking` (how a caller consumes it).
+ *  - [ours_kotlin_flow_batched] — `queryBatched(sql, 100_000) { mapper }` → the same objects, but
+ *                                 emitted in 100k-row `List`s. Batching amortises the per-row
+ *                                 `flowOn(Dispatchers.IO)` channel handoff (~1M → ~10 crossings).
+ *  - [ours_java_mapped]         — the Java row-oriented baseline: `query(sql, Class<T>)` lazy
+ *                                 mapped `Stream` → one object per row. The non-Flow apples-to-
+ *                                 apples reference for both Kotlin lanes.
+ *  - [ours_java_columnar]       — the Java zero-boxing column-major path: read the primitive
+ *                                 backing arrays directly. The ceiling the row-oriented APIs trade
+ *                                 away.
  *
- * The Flow lane is expected to be slower and allocate more (a [ResultRow] per row + Flow channel
- * emit across the `flowOn(Dispatchers.IO)` boundary + the constant `runBlocking` cost); the point
- * is to *measure* that ergonomics tax and guard against regressions, not to win a comparison.
+ * The per-row Flow lane is expected to be much slower (a [ResultRow] per row + a Flow channel
+ * `emit` across the `flowOn` boundary *per row* + the constant `runBlocking` cost). The batched
+ * lane isolates how much of that is the per-element channel crossing: it should land near
+ * [ours_java_mapped]. The point is to *measure* the ergonomics tax and guard against regressions.
  *
  * Run with the `gc` profiler (already enabled in `jmh { profilers.add("gc") }`) to get ms/op and
  * MB/op:
@@ -103,6 +110,15 @@ open class KotlinStreamingSelectBenchmark {
         }
     }
 
+    /** Batched Kotlin Flow lane: `queryBatched { mapper }` → 100k-row lists, collected under `runBlocking`. */
+    @Benchmark
+    fun ours_kotlin_flow_batched(bh: Blackhole) {
+        runBlocking {
+            nativeConn.queryBatched(SELECT_SQL, BATCH_SIZE) { row -> MappedRow(row.long("id"), row.double("value")) }
+                .collect { batch -> bh.consume(batch) }
+        }
+    }
+
     /** Java row-oriented baseline: lazy `query(sql, Class<T>)` mapped `Stream` → objects. */
     @Benchmark
     fun ours_java_mapped(bh: Blackhole) {
@@ -137,5 +153,8 @@ open class KotlinStreamingSelectBenchmark {
     private companion object {
         /** Selects exactly the two mapped columns, matching the other select benchmarks. */
         const val SELECT_SQL = "SELECT id, value FROM bench"
+
+        /** Rows per emitted batch for [ours_kotlin_flow_batched]. */
+        const val BATCH_SIZE = 100_000
     }
 }
