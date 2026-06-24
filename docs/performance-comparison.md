@@ -50,9 +50,11 @@ no boxing — measures wire/decode throughput and allocation.
 | clickhouse-jdbc v2 (HTTP) | 53.9 ms / 261.5 MB |
 | housepower (native) | 58.7 ms / 384.3 MB |
 
-~5.5× faster than the official driver's fastest read path, at **16×** less
-allocation. v2's binary reader materialises a `Map`-backed record per row even
-behind positional getters; our columnar path touches only the backing arrays.
+The durable win is **16× less allocation**: v2's binary reader materialises a
+`Map`-backed record per row even behind positional getters, while our columnar
+path touches only the backing arrays. Wall clock follows from that — ~5.5× faster
+in this session — but on loopback that ratio is the noisier figure (see the
+note above on treating allocation, not absolute ms, as the durable finding).
 
 ## Materialised typed reads — 1M rows → objects (`MappedSelectBenchmark`)
 
