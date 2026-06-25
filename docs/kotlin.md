@@ -7,6 +7,7 @@
 - [Commands and scalars](#commands-and-scalars)
 - [Streaming queries](#streaming-queries)
 - [Typed queries with queryAs](#typed-queries-with-queryas)
+- [Batched and block-granular streaming](#batched-and-block-granular-streaming)
 - [Query parameters](#query-parameters)
 - [Bulk insert](#bulk-insert)
 - [Pooling](#pooling)
@@ -96,6 +97,36 @@ Binding rules:
 
 Names match exactly first, then case-insensitively. SQL `NULL` into a non-nullable parameter throws `ClickHouseException`; nullable parameters (`String?`, `Long?`, …) accept it.
 
+## Batched and block-granular streaming
+
+Per-row `queryFlow`/`queryAs` cross the coroutine channel that `flowOn` inserts **once per row** — at high row counts that handoff, not decoding or allocation, dominates (per-row `queryFlow` runs ~10× slower than the same read in 100k-row batches; see [Kotlin Flow overhead](performance-comparison.md#kotlin-flow-overhead--1m-row-read-kotlinstreamingselectbenchmark-ours-only)). Three opt-in shapes emit fewer, larger items so the channel is crossed once per batch (or block) instead of once per row.
+
+`queryBatched` — explicit mapper, rows grouped into fixed-size `List<T>` chunks. Every chunk holds exactly `batchSize` rows except the last (the partial remainder); the size is exact regardless of how the server frames its blocks:
+
+```kotlin
+conn.queryBatched("SELECT id, value FROM t", batchSize = 100_000) { row ->
+    Reading(row.long("id"), row.double("value"))
+}.collect { batch: List<Reading> -> /* batch.size == 100_000, last batch partial */ }
+```
+
+`queryAsBatched<T>` — the auto-mapping counterpart (same binding rules as `queryAs`):
+
+```kotlin
+conn.queryAsBatched<Event>("SELECT id, name, score FROM events", batchSize = 100_000)
+    .collect { batch: List<Event> -> /* ... */ }
+```
+
+`queryBlocks` — the lowest-overhead primitive: whole column-major `Block`s, read positionally with **no per-row object**. A `Block` is a view valid only during collection — consume it in the collector, don't retain it past the flow:
+
+```kotlin
+conn.queryBlocks("SELECT id FROM t").collect { block ->
+    val ids = block.column(0)
+    for (r in 0 until block.rowCount()) sum += ids.longAt(r)
+}
+```
+
+All three are cold (nothing runs until collected) and close the underlying result in a `finally` on completion **and** cancellation, exactly like `queryFlow`. `batchSize` must be positive (else `IllegalArgumentException`, thrown eagerly).
+
 ## Query parameters
 
 Server-side `{name:Type}` binding, with two construction styles:
@@ -114,7 +145,7 @@ conn.queryFlow(
 ).collect { /* ... */ }
 ```
 
-`command` and `scalar` accept parameters too. Note that `queryAs` does not take parameters — for parameterized *typed* queries, use `query(sql, params) { row -> ... }` with an explicit mapper.
+`command`, `scalar`, `queryFlow`, `query`, `queryBatched`, and `queryBlocks` all have parameterized overloads. `queryAs`/`queryAsBatched` do not — for parameterized *typed* queries use the explicit-mapper form, `query(sql, params) { row -> ... }` or `queryBatched(sql, params, batchSize) { row -> ... }`.
 
 ## Bulk insert
 

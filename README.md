@@ -49,7 +49,7 @@ Full walkthrough (table, insert, typed reads): [docs/quickstart.md](docs/quickst
 - **Failover & load balancing** — multi-endpoint configs with `FIRST_ALIVE`, `ROUND_ROBIN`, `RANDOM` policies
 - **TLS / mTLS / tokens** — trust stores, client certificates, access-token auth
 - **JDBC 4.3 driver** — `jdbc:chnative://`, prepared statements, multi-row batch collapse
-- **Kotlin coroutines** — suspend functions, `Flow` streaming, config DSL, `Flow`-sourced bulk insert
+- **Kotlin coroutines** — suspend functions, `Flow` streaming (per-row, batched `List<T>`, or whole blocks), config DSL, `Flow`-sourced bulk insert
 - **50+ ClickHouse types** — through `Variant`, `Dynamic`, `JSON`, and Geo
 - **Cross-client tested** — round-trip compatibility with the official JDBC driver verified on ClickHouse 25.8–26.5
 
@@ -299,11 +299,12 @@ Server-side accounting for the same inserts (`system.query_log`, via the `Insert
 
 | API | Time | Alloc / op |
 |---|---|---|
-| Java columnar blocks | **9.4 ms** | 16.0 MB |
-| Java `query(sql, Class)` | 27.9 ms | 144.0 MB |
-| Kotlin `queryFlow` | 178.2 ms | 83.8 MB |
+| Java columnar blocks | **9.2 ms** | **16.0 MB** |
+| Kotlin `queryBatched` (100k batches) | 18.0 ms | 76.4 MB |
+| Java `query(sql, Class)` | 28.8 ms | 144.0 MB |
+| Kotlin `queryFlow` (per-row) | 181.5 ms | 83.1 MB |
 
-Per-row `Flow` emission has real overhead; for hot paths, read columnar blocks and wrap your own batching.
+Per-row `Flow` emission has real overhead — almost entirely the per-element `flowOn` channel handoff. `queryBatched(sql, batchSize) { … }` emits fixed-size `List<T>` chunks (partial final chunk), crossing that channel once per batch instead of once per row: at 100k it runs **~10× faster** than per-row `queryFlow`. For raw columnar throughput, `queryBlocks(sql)` emits whole blocks.
 
 ### Test conditions
 

@@ -3,6 +3,7 @@ package io.github.danielbunting.clickhouse.kotlin
 import io.github.danielbunting.clickhouse.ClickHouseConnection
 import io.github.danielbunting.clickhouse.QueryParameters
 import io.github.danielbunting.clickhouse.QueryResult
+import io.github.danielbunting.clickhouse.protocol.Block
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -92,6 +93,36 @@ fun ClickHouseConnection.queryFlow(
 ): Flow<ResultRow> = resultRowFlow(dispatcher) { query(sql, params) }
 
 /**
+ * Streams a SELECT as a cold [Flow] of whole column-major [Block]s — the low-overhead
+ * primitive under [queryFlow] and [queryBatched].
+ *
+ * Each emission is one server block (its size is whatever the server sends — governed by
+ * `max_block_size`, default 65,536 rows; the final block is naturally partial). Unlike the
+ * per-row [queryFlow], this emits once per block rather than once per row, so the coroutine
+ * channel introduced by [flowOn] is crossed ~`rows / blockSize` times instead of once per row.
+ * Read values positionally off the block's columns (e.g. `block.column(0).longAt(row)`).
+ *
+ * Lifecycle matches [queryFlow]: the lazy [QueryResult] is opened on collection and closed in a
+ * `finally` (completion **and** cancellation); empty blocks are skipped. A [Block] is a fresh
+ * object per iteration, but **consume it inside the collector** — do not retain it past flow
+ * completion, when the underlying result is closed.
+ */
+fun ClickHouseConnection.queryBlocks(
+    sql: String,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): Flow<Block> = blockFlow(dispatcher) { query(sql) }
+
+/**
+ * Streams a SELECT with server-side [params] bound into `{name:Type}` placeholders as a cold
+ * [Flow] of [Block]s. Same lifecycle as [queryBlocks] without parameters.
+ */
+fun ClickHouseConnection.queryBlocks(
+    sql: String,
+    params: QueryParameters,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): Flow<Block> = blockFlow(dispatcher) { query(sql, params) }
+
+/**
  * Streams a SELECT, mapping each row to `T` with an explicit, allocation-free lambda:
  *
  * ```
@@ -115,6 +146,42 @@ fun <T> ClickHouseConnection.query(
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
     map: (ResultRow) -> T,
 ): Flow<T> = queryFlow(sql, params, dispatcher).map(map)
+
+/**
+ * Streams a SELECT as a cold [Flow] of fixed-size row batches: each emitted [List] holds exactly
+ * [batchSize] mapped values, except the final one, which carries the remainder (a partial chunk).
+ *
+ * ```
+ * conn.query("SELECT id, value FROM t", batchSize = 100_000) { row ->
+ *     MappedRow(row.long("id"), row.double("value"))
+ * }.collect { batch -> /* batch.size == 100_000, last batch partial */ }
+ * ```
+ *
+ * This is the ergonomic throughput path: rows are accumulated across server-block boundaries and
+ * emitted in one [flowOn] handoff per batch instead of per row, which is the dominant cost of the
+ * per-row [query]/[queryFlow] at high row counts. The batch size is exact and independent of the
+ * server's `max_block_size`.
+ *
+ * [map] runs on [dispatcher] (upstream of [flowOn]) and must produce **immutable** values — the
+ * emitted `List<T>` outlives the [ResultRow]/[Block] it was built from, so the row views must not
+ * escape it. Lifecycle matches [queryFlow] (lazy open, `finally` close on completion and
+ * cancellation). Throws [IllegalArgumentException] if [batchSize] is not positive.
+ */
+fun <T> ClickHouseConnection.queryBatched(
+    sql: String,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    map: (ResultRow) -> T,
+): Flow<List<T>> = batchedFlow(batchSize, dispatcher, { query(sql) }, map)
+
+/** [queryBatched] with server-side [params] bound into `{name:Type}` placeholders. */
+fun <T> ClickHouseConnection.queryBatched(
+    sql: String,
+    params: QueryParameters,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    map: (ResultRow) -> T,
+): Flow<List<T>> = batchedFlow(batchSize, dispatcher, { query(sql, params) }, map)
 
 /**
  * Streams a SELECT as a cold [Flow] of [type] instances, picking the mapping strategy by what
@@ -177,6 +244,43 @@ inline fun <reified T : Any> ClickHouseConnection.queryAs(
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ): Flow<T> = queryAs(sql, T::class.java, dispatcher)
 
+/**
+ * Batched [queryAs]: streams a SELECT as a cold [Flow] of fixed-size [List]s of [type] instances —
+ * the auto-mapping counterpart of [queryBatched] (which takes an explicit lambda). Each list holds
+ * exactly [batchSize] mapped values, except the final one, which carries the remainder.
+ *
+ * ```
+ * conn.queryAsBatched<Event>("SELECT id, name FROM t", batchSize = 100_000)
+ *     .collect { batch -> /* List<Event>, last batch partial */ }
+ * ```
+ *
+ * Mapping-strategy selection is identical to [queryAs] (Kotlin primary-constructor binding for
+ * Kotlin classes; the core record/POJO mapper otherwise), and the batching is done upstream of
+ * [flowOn] so the channel is crossed once per batch, not once per row. Lifecycle matches [queryAs]
+ * (lazy open, `finally` close on completion and cancellation). Throws [IllegalArgumentException] if
+ * [batchSize] is not positive.
+ */
+fun <T : Any> ClickHouseConnection.queryAsBatched(
+    sql: String,
+    type: Class<T>,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): Flow<List<T>> {
+    require(batchSize > 0) { "batchSize must be > 0, was $batchSize" }
+    return if (isPrimaryConstructorBindable(type)) {
+        constructorBoundBatchedFlow(sql, type, batchSize, dispatcher)
+    } else {
+        streamBatchedFlow(sql, type, batchSize, dispatcher)
+    }
+}
+
+/** Reified-type convenience for [queryAsBatched]: `conn.queryAsBatched<Event>("SELECT ...", 100_000)`. */
+inline fun <reified T : Any> ClickHouseConnection.queryAsBatched(
+    sql: String,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): Flow<List<T>> = queryAsBatched(sql, T::class.java, batchSize, dispatcher)
+
 /** Shared producer for the [ResultRow] flows: open lazily, close on completion/cancellation. */
 private fun ClickHouseConnection.resultRowFlow(
     dispatcher: CoroutineDispatcher,
@@ -198,5 +302,118 @@ private fun ClickHouseConnection.resultRowFlow(
         }
     } finally {
         result.close()
+    }
+}.flowOn(dispatcher)
+
+/** Shared producer for the [Block] flows: one emit per non-empty server block. */
+private fun ClickHouseConnection.blockFlow(
+    dispatcher: CoroutineDispatcher,
+    produce: ClickHouseConnection.() -> QueryResult,
+): Flow<Block> = flow {
+    val result = produce()
+    try {
+        val blocks = result.blocks()
+        while (blocks.hasNext()) {
+            val block = blocks.next()
+            if (block.isEmpty) continue
+            emit(block)
+        }
+    } finally {
+        result.close()
+    }
+}.flowOn(dispatcher)
+
+/**
+ * Shared producer for the batched flows: maps rows across block boundaries into fixed-size
+ * [batchSize] lists, emitting a partial final list for the remainder. A fresh list is allocated
+ * per batch because [flowOn]'s buffered channel may still hold an emitted list in flight.
+ */
+private fun <T> ClickHouseConnection.batchedFlow(
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher,
+    produce: ClickHouseConnection.() -> QueryResult,
+    map: (ResultRow) -> T,
+): Flow<List<T>> {
+    require(batchSize > 0) { "batchSize must be > 0, was $batchSize" }
+    return flow {
+        val result = produce()
+        try {
+            val names = result.columnNames()
+            val nameToIndex = LinkedHashMap<String, Int>(names.size)
+            names.forEachIndexed { i, n -> nameToIndex.putIfAbsent(n, i) }
+
+            var batch = ArrayList<T>(batchSize)
+            val blocks = result.blocks()
+            while (blocks.hasNext()) {
+                val block = blocks.next()
+                if (block.isEmpty) continue
+                for (row in 0 until block.rowCount()) {
+                    batch.add(map(ResultRow(block, row, nameToIndex)))
+                    if (batch.size == batchSize) {
+                        emit(batch)
+                        batch = ArrayList(batchSize)
+                    }
+                }
+            }
+            if (batch.isNotEmpty()) emit(batch)
+        } finally {
+            result.close()
+        }
+    }.flowOn(dispatcher)
+}
+
+/**
+ * [queryAsBatched] over the primary-constructor binder: header resolved once, then rows mapped and
+ * accumulated into fixed-size [batchSize] lists (partial final list), batched upstream of [flowOn].
+ */
+private fun <T : Any> ClickHouseConnection.constructorBoundBatchedFlow(
+    sql: String,
+    type: Class<T>,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher,
+): Flow<List<T>> = flow {
+    val result = query(sql)
+    try {
+        val mapper = PrimaryConstructorMapper(type, result.columnNames())
+        var batch = ArrayList<T>(batchSize)
+        val blocks = result.blocks()
+        while (blocks.hasNext()) {
+            val block = blocks.next()
+            if (block.isEmpty) continue
+            for (row in 0 until block.rowCount()) {
+                batch.add(mapper.map(block, row))
+                if (batch.size == batchSize) {
+                    emit(batch)
+                    batch = ArrayList(batchSize)
+                }
+            }
+        }
+        if (batch.isNotEmpty()) emit(batch)
+    } finally {
+        result.close()
+    }
+}.flowOn(dispatcher)
+
+/**
+ * [queryAsBatched] over the core record/POJO mapper: chunks the lazy `query(sql, type)` stream into
+ * fixed-size [batchSize] lists (partial final list), batched upstream of [flowOn].
+ */
+private fun <T : Any> ClickHouseConnection.streamBatchedFlow(
+    sql: String,
+    type: Class<T>,
+    batchSize: Int,
+    dispatcher: CoroutineDispatcher,
+): Flow<List<T>> = flow {
+    query(sql, type).use { stream ->
+        val rows = stream.iterator()
+        var batch = ArrayList<T>(batchSize)
+        while (rows.hasNext()) {
+            batch.add(rows.next())
+            if (batch.size == batchSize) {
+                emit(batch)
+                batch = ArrayList(batchSize)
+            }
+        }
+        if (batch.isNotEmpty()) emit(batch)
     }
 }.flowOn(dispatcher)
