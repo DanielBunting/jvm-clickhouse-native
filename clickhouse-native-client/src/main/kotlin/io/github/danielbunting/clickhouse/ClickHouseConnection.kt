@@ -152,6 +152,23 @@ public interface ClickHouseConnection : AutoCloseable {
     /** Opens a bulk inserter targeting [table], mapping [type]'s fields to columns. */
     public fun <T> createBulkInserter(table: String, type: Class<T>): BulkInserter<T>
 
+    /**
+     * Opens a bulk inserter whose rows are mapped by a caller-supplied
+     * [RowMapperFactory][io.github.danielbunting.clickhouse.mapping.RowMapperFactory] rather than
+     * by introspecting [type]. The factory is invoked with the target's column names once the
+     * server's sample block is read; this lets non-POJO sources (e.g. Arrow vectors) feed the
+     * native inserter. The default throws; native connections override it.
+     */
+    public fun <T> createBulkInserter(
+        table: String,
+        type: Class<T>,
+        mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
+    ): BulkInserter<T> {
+        throw UnsupportedOperationException(
+            "createBulkInserter with a RowMapperFactory is not supported by this connection"
+        )
+    }
+
     /** Asynchronous variant of [query]. */
     public fun queryAsync(sql: String): CompletableFuture<QueryResult>
 

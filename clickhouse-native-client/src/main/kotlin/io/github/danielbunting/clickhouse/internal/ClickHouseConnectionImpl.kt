@@ -227,6 +227,14 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
         return BulkInserterImpl(client, table, type, batchSize(), guard)
     }
 
+    override fun <T> createBulkInserter(
+        table: String,
+        type: Class<T>,
+        mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
+    ): BulkInserter<T> {
+        return BulkInserterImpl(client, table, type, batchSize(), guard, mapperFactory)
+    }
+
     override fun queryAsync(sql: String): CompletableFuture<QueryResult> {
         // NOTE: the connection is single-threaded. This does NOT add concurrency to
         // a single connection — it only offloads the blocking call to a daemon

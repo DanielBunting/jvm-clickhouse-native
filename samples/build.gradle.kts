@@ -23,6 +23,10 @@ dependencies {
     // JSON parsing for the live-stream samples. Streams themselves are read with the
     // JDK's java.net.http HttpClient/WebSocket — no extra client SDK is needed.
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
+    // ADBC sample: discover the driver the way an external Arrow consumer would.
+    implementation(project(":clickhouse-native-client-adbc"))
+    implementation("org.apache.arrow.adbc:adbc-driver-manager:0.23.0")
+    runtimeOnly("org.apache.arrow:arrow-memory-netty:18.3.0")
 }
 
 // The module hosts several runnable demos; register one run task per sample.
@@ -30,6 +34,7 @@ dependencies {
 val sampleMains = mapOf(
     // Java samples (native API directly).
     "runQuickStart" to "io.github.danielbunting.clickhouse.samples.QuickStart",
+    "runAdbcQuickStart" to "io.github.danielbunting.clickhouse.samples.AdbcQuickStart",
     "runQueries" to "io.github.danielbunting.clickhouse.samples.Queries",
     "runBulkInserts" to "io.github.danielbunting.clickhouse.samples.BulkInserts",
     "runPooling" to "io.github.danielbunting.clickhouse.samples.Pooling",
@@ -53,6 +58,8 @@ sampleMains.forEach { (taskName, fqcn) ->
         description = "Runs the $fqcn sample"
         mainClass.set(fqcn)
         classpath = sourceSets["main"].runtimeClasspath
+        // Harmless for the non-Arrow samples; required by the ADBC sample's off-heap allocator.
+        jvmArgs("--add-opens=java.base/java.nio=ALL-UNNAMED")
     }
 }
 

@@ -55,6 +55,16 @@ public class TupleColumnCodec(elements: Array<out ColumnCodec<*>?>?, names: Arra
         return elements.copyOf()
     }
 
+    /**
+     * Returns the parallel element field names in declaration order; a `null`
+     * entry marks an unnamed (positional) element. The array length matches
+     * [elements]. Consumers that need stable names for unnamed elements should
+     * substitute a positional placeholder.
+     */
+    public fun names(): Array<String?> {
+        return names.copyOf()
+    }
+
     override fun typeName(): String {
         val sb = StringBuilder("Tuple(")
         for (i in elements.indices) {

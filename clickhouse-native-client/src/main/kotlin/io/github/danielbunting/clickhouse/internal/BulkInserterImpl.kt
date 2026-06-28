@@ -5,6 +5,7 @@ import io.github.danielbunting.clickhouse.ProtocolException
 import io.github.danielbunting.clickhouse.ServerException
 import io.github.danielbunting.clickhouse.mapping.ColumnBinder
 import io.github.danielbunting.clickhouse.mapping.RowMapper
+import io.github.danielbunting.clickhouse.mapping.RowMapperFactory
 import io.github.danielbunting.clickhouse.mapping.RowMappers
 import io.github.danielbunting.clickhouse.protocol.Block
 import io.github.danielbunting.clickhouse.protocol.ServerPacket
@@ -55,6 +56,12 @@ internal constructor(
     batchSize: Int,
     /** Connection guard held from [init] to [complete]/[close]. */
     private val guard: ConnectionGuard,
+    /**
+     * Optional override that builds the [RowMapper] from the target column names instead of
+     * introspecting [type]. When set, the reflective `bind`-into-scratch path is always used
+     * (the typed [ColumnBinder] fast path, which needs a POJO, is disabled).
+     */
+    private val mapperFactory: RowMapperFactory<T>? = null,
 ) : BulkInserter<T> {
 
     private val client: NativeClient
@@ -212,18 +219,25 @@ internal constructor(
         @Suppress("UNCHECKED_CAST")
         val resolvedCodecs = codecs as Array<ColumnCodec<*>>
 
-        this.mapper = RowMappers.forClass(type, *names)
-
-        // Build typed binders for the write path. If anything goes wrong, fall back
-        // entirely to the reflective Object-scratch path (binders == null).
-        try {
-            val nullableFlags = BooleanArray(columnCount)
-            for (i in 0 until columnCount) {
-                nullableFlags[i] = columns[i]!!.isNullable
-            }
-            this.binders = RowMappers.columnBinders(type, names, resolvedCodecs, nullableFlags)
-        } catch (e: RuntimeException) {
+        val mapperFactory = this.mapperFactory
+        if (mapperFactory != null) {
+            // Caller-supplied mapper (e.g. Arrow-backed): always use the reflective scratch path.
+            this.mapper = mapperFactory.create(names)
             this.binders = null
+        } else {
+            this.mapper = RowMappers.forClass(type, *names)
+
+            // Build typed binders for the write path. If anything goes wrong, fall back
+            // entirely to the reflective Object-scratch path (binders == null).
+            try {
+                val nullableFlags = BooleanArray(columnCount)
+                for (i in 0 until columnCount) {
+                    nullableFlags[i] = columns[i]!!.isNullable
+                }
+                this.binders = RowMappers.columnBinders(type, names, resolvedCodecs, nullableFlags)
+            } catch (e: RuntimeException) {
+                this.binders = null
+            }
         }
 
         this.bufferedRows = 0
