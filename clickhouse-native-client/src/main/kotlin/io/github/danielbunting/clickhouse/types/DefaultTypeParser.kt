@@ -1,6 +1,7 @@
 package io.github.danielbunting.clickhouse.types
 
 import io.github.danielbunting.clickhouse.ClickHouseException
+import io.github.danielbunting.clickhouse.UnsupportedTypeException
 import io.github.danielbunting.clickhouse.types.codec.ArrayColumnCodec
 import io.github.danielbunting.clickhouse.types.codec.BFloat16Codec
 import io.github.danielbunting.clickhouse.types.codec.BoolCodec
@@ -238,7 +239,7 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
         // worse, silently mis-reading the stream. (Note: -State columns are not emitted
         // sparse and carry has_custom=0, so this is reached via normal column resolution.)
         if (startsWithIgnoreCase(type, "AggregateFunction(")) {
-            throw ClickHouseException(
+            throw UnsupportedTypeException(
                 "AggregateFunction decode is not supported: " + chType
                     + ". Its Native column data is opaque, function-specific "
                     + "intermediate state with no length framing, so values cannot "
@@ -337,7 +338,7 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
             "IntervalMonth" -> IntervalCodec(IntervalCodec.Unit.MONTH)
             "IntervalQuarter" -> IntervalCodec(IntervalCodec.Unit.QUARTER)
             "IntervalYear" -> IntervalCodec(IntervalCodec.Unit.YEAR)
-            else -> throw ClickHouseException("Unsupported ClickHouse type: " + original)
+            else -> throw UnsupportedTypeException("Unsupported ClickHouse type: " + original)
         }
     }
 

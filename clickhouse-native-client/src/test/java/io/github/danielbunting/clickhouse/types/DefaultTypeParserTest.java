@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.danielbunting.clickhouse.ClickHouseException;
+import io.github.danielbunting.clickhouse.UnsupportedTypeException;
 import io.github.danielbunting.clickhouse.types.codec.ArrayColumnCodec;
 import io.github.danielbunting.clickhouse.types.codec.DateCodec;
 import io.github.danielbunting.clickhouse.types.codec.DateTime64Codec;
@@ -208,5 +209,21 @@ class DefaultTypeParserTest {
             assertThrows(ClickHouseException.class, () -> parser.parse(type),
                     "Unsupported type must throw ClickHouseException: " + type);
         }
+    }
+
+    /**
+     * Supported-type-boundary refusals throw the specific {@link UnsupportedTypeException}
+     * (so callers like the ADBC bridge can map them to "not implemented"), while malformed
+     * type strings stay a plain {@link ClickHouseException}.
+     */
+    @Test
+    void unsupportedTypesThrowUnsupportedTypeException() {
+        assertThrows(UnsupportedTypeException.class,
+                () -> parser.parse("AggregateFunction(sum, UInt64)"));
+        assertThrows(UnsupportedTypeException.class, () -> parser.parse("Bogus"));
+
+        // Malformed (bad syntax) stays a plain ClickHouseException, not UnsupportedTypeException.
+        assertFalse(assertThrows(ClickHouseException.class, () -> parser.parse(""))
+                instanceof UnsupportedTypeException);
     }
 }
