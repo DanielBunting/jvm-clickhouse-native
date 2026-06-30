@@ -9,10 +9,12 @@ import org.apache.arrow.vector.BitVector
 import org.apache.arrow.vector.DateDayVector
 import org.apache.arrow.vector.Decimal256Vector
 import org.apache.arrow.vector.DecimalVector
+import org.apache.arrow.vector.DurationVector
 import org.apache.arrow.vector.FieldVector
 import org.apache.arrow.vector.FixedSizeBinaryVector
 import org.apache.arrow.vector.Float4Vector
 import org.apache.arrow.vector.Float8Vector
+import org.apache.arrow.vector.IntervalYearVector
 import org.apache.arrow.vector.TimeStampMicroTZVector
 import org.apache.arrow.vector.TimeStampMilliTZVector
 import org.apache.arrow.vector.TimeStampNanoTZVector
@@ -25,6 +27,7 @@ import org.apache.arrow.vector.complex.StructVector
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.time.LocalDate
+import java.time.Period
 
 /**
  * Write-path bridge: feeds a bound Arrow [VectorSchemaRoot] into the native bulk inserter as
@@ -78,14 +81,17 @@ public object ArrowToBlock {
                     throw UnsupportedOperationException("ingest mapper is write-only")
                 override fun bind(value: Int, dest: Array<Any?>) {
                     for (i in ordered.indices) {
-                        dest[i] = arrowToJava(ordered[i], value)
+                        dest[i] = toJavaValue(ordered[i], value)
                     }
                 }
             }
         }
 
+        // Name exactly the bound columns in the INSERT so a table column absent from the root
+        // takes its server-side DEFAULT instead of failing the ingest.
+        val boundColumns = root.fieldVectors.map { it.field.name }
         try {
-            connection.createBulkInserter(targetTable, Int::class.javaObjectType, factory).use { inserter ->
+            connection.createBulkInserter(targetTable, Int::class.javaObjectType, boundColumns, factory).use { inserter ->
                 inserter.init()
                 for (r in 0 until rowCount) {
                     inserter.add(r)
@@ -128,8 +134,14 @@ public object ArrowToBlock {
         return "CREATE TABLE $guard$targetTable ($columns) ENGINE = MergeTree ORDER BY tuple()"
     }
 
-    /** Reconstructs the boxed Java value a ClickHouse codec accepts from one Arrow cell. */
-    private fun arrowToJava(vector: FieldVector, index: Int): Any? {
+    /**
+     * Reconstructs the boxed Java value a ClickHouse codec accepts from one Arrow cell — the
+     * inverse of [BlockToArrow]. Returns the same Java families the core client yields
+     * (`Long`/`Double`/`String`/`Instant`/`LocalDate`/`BigDecimal`/`List`/`Map`), so it doubles as
+     * the canonical Arrow→Java decoder for equivalence checks.
+     */
+    @JvmStatic
+    public fun toJavaValue(vector: FieldVector, index: Int): Any? {
         if (vector.isNull(index)) {
             return null
         }
@@ -152,6 +164,10 @@ public object ArrowToBlock {
             }
             is DecimalVector -> vector.getObject(index)
             is Decimal256Vector -> vector.getObject(index)
+            // Time/Time64 and non-calendar Intervals → Duration; calendar Intervals → Period. The
+            // ClickHouse Interval/Time codecs accept either back through their `set`.
+            is DurationVector -> vector.getObject(index)
+            is IntervalYearVector -> Period.ofMonths(vector.get(index))
             is FixedSizeBinaryVector -> vector.get(index)
             is MapVector -> readMap(vector, index)
             is ListVector -> readList(vector, index)
@@ -168,7 +184,7 @@ public object ArrowToBlock {
         val data = vector.dataVector as FieldVector
         val out = ArrayList<Any?>(end - start)
         for (j in start until end) {
-            out.add(arrowToJava(data, j))
+            out.add(toJavaValue(data, j))
         }
         return out
     }
@@ -177,7 +193,7 @@ public object ArrowToBlock {
         val childCount = vector.field.children.size
         val out = ArrayList<Any?>(childCount)
         for (i in 0 until childCount) {
-            out.add(arrowToJava(vector.getChildByOrdinal(i) as FieldVector, index))
+            out.add(toJavaValue(vector.getChildByOrdinal(i) as FieldVector, index))
         }
         return out
     }
@@ -190,7 +206,7 @@ public object ArrowToBlock {
         val values = entries.getChildByOrdinal(1) as FieldVector
         val out = LinkedHashMap<Any?, Any?>()
         for (j in start until end) {
-            out[arrowToJava(keys, j)] = arrowToJava(values, j)
+            out[toJavaValue(keys, j)] = toJavaValue(values, j)
         }
         return out
     }

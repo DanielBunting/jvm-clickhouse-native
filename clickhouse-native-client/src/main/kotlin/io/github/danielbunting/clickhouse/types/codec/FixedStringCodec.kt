@@ -62,8 +62,15 @@ public class FixedStringCodec(length: Int) : ColumnCodec<Array<Any?>> {
     override fun write(out: BinaryWriter, src: Array<Any?>, rowCount: Int) {
         val buf = ByteArray(length)
         for (i in 0 until rowCount) {
-            val s = src[i] as String?
-            val encoded = if (s == null) ByteArray(0) else s.toByteArray(StandardCharsets.UTF_8)
+            // FixedString is a fixed-width byte field: accept raw bytes (e.g. an Arrow
+            // FixedSizeBinary cell) as well as a String.
+            val encoded = when (val v = src[i]) {
+                null -> ByteArray(0)
+                is ByteArray -> v
+                is String -> v.toByteArray(StandardCharsets.UTF_8)
+                else -> throw IllegalArgumentException(
+                    "Cannot write FixedString from: " + v.javaClass.name)
+            }
             // Clear the buffer (zero-pad)
             for (j in 0 until length) {
                 buf[j] = 0

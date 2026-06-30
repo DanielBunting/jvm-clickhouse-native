@@ -155,13 +155,32 @@ public interface ClickHouseConnection : AutoCloseable {
     /**
      * Opens a bulk inserter whose rows are mapped by a caller-supplied
      * [RowMapperFactory][io.github.danielbunting.clickhouse.mapping.RowMapperFactory] rather than
-     * by introspecting [type]. The factory is invoked with the target's column names once the
-     * server's sample block is read; this lets non-POJO sources (e.g. Arrow vectors) feed the
-     * native inserter. The default throws; native connections override it.
+     * by introspecting [type], targeting every insertable column. Convenience for
+     * [createBulkInserter] with a `null` column list.
      */
     public fun <T> createBulkInserter(
         table: String,
         type: Class<T>,
+        mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
+    ): BulkInserter<T> {
+        return createBulkInserter(table, type, null, mapperFactory)
+    }
+
+    /**
+     * Opens a bulk inserter whose rows are mapped by a caller-supplied
+     * [RowMapperFactory][io.github.danielbunting.clickhouse.mapping.RowMapperFactory] rather than
+     * by introspecting [type]. The factory is invoked with the target's column names once the
+     * server's sample block is read; this lets non-POJO sources (e.g. Arrow vectors) feed the
+     * native inserter.
+     *
+     * If [columns] is non-null the INSERT names exactly those columns, so a caller can ingest a
+     * subset and any omitted column takes its server-side DEFAULT; pass `null` to target every
+     * insertable column. The default throws; native connections override it.
+     */
+    public fun <T> createBulkInserter(
+        table: String,
+        type: Class<T>,
+        columns: List<String>?,
         mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
     ): BulkInserter<T> {
         throw UnsupportedOperationException(

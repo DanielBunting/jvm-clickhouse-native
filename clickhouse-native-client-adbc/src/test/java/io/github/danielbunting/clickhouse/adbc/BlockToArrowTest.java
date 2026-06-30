@@ -6,15 +6,28 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.danielbunting.clickhouse.protocol.Block;
+import io.github.danielbunting.clickhouse.types.codec.BFloat16Codec;
+import io.github.danielbunting.clickhouse.types.codec.Int128Codec;
+import io.github.danielbunting.clickhouse.types.codec.IntervalCodec;
+import io.github.danielbunting.clickhouse.types.codec.NothingCodec;
+import io.github.danielbunting.clickhouse.types.codec.Time64Codec;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Period;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.DurationVector;
+import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.IntervalYearVector;
+import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.DateUnit;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.IntervalUnit;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -118,7 +131,26 @@ class BlockToArrowTest {
                 Arguments.of("LowCardinality(Nullable(String))", new ArrowType.Utf8(), true),
                 Arguments.of("Array(Int32)", new ArrowType.List(), false),
                 Arguments.of("Map(String, Int32)", new ArrowType.Map(false), false),
-                Arguments.of("Tuple(Int32, String)", new ArrowType.Struct(), false));
+                Arguments.of("Tuple(Int32, String)", new ArrowType.Struct(), false),
+                // Wide integers carry their exact value as a base-10 string.
+                Arguments.of("Int128", new ArrowType.Utf8(), false),
+                Arguments.of("UInt128", new ArrowType.Utf8(), false),
+                Arguments.of("Int256", new ArrowType.Utf8(), false),
+                Arguments.of("UInt256", new ArrowType.Utf8(), false),
+                Arguments.of("BFloat16", new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), false),
+                Arguments.of("JSON", new ArrowType.Utf8(), false),
+                Arguments.of("Dynamic", new ArrowType.Utf8(), false),
+                Arguments.of("Variant(Int64, String)", new ArrowType.Utf8(), false),
+                Arguments.of("Nothing", new ArrowType.Null(), false),
+                // Time/Time64 and non-calendar Intervals → Duration; calendar Intervals → Interval(YEAR_MONTH).
+                Arguments.of("Time", new ArrowType.Duration(TimeUnit.SECOND), false),
+                Arguments.of("Time64(3)", new ArrowType.Duration(TimeUnit.MILLISECOND), false),
+                Arguments.of("Time64(9)", new ArrowType.Duration(TimeUnit.NANOSECOND), false),
+                Arguments.of("IntervalSecond", new ArrowType.Duration(TimeUnit.SECOND), false),
+                Arguments.of("IntervalDay", new ArrowType.Duration(TimeUnit.SECOND), false),
+                Arguments.of("IntervalNanosecond", new ArrowType.Duration(TimeUnit.NANOSECOND), false),
+                Arguments.of("IntervalMonth", new ArrowType.Interval(IntervalUnit.YEAR_MONTH), false),
+                Arguments.of("IntervalYear", new ArrowType.Interval(IntervalUnit.YEAR_MONTH), false));
     }
 
     @Test
@@ -150,5 +182,75 @@ class BlockToArrowTest {
         assertArrayEquals(
                 new String[] {"f0", "f1"},
                 field.getChildren().stream().map(Field::getName).toArray());
+    }
+
+    @Test
+    void int128ColumnReadsAsDecimalString(BufferAllocator allocator) {
+        String max = "170141183460469231731687303715884105727"; // 2^127 - 1
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "w", "Int128", new Int128Codec(), new Object[] {BigInteger.ZERO, new BigInteger(max)}));
+        Schema schema = ClickHouseArrowTypes.schema(List.of("w"), List.of("Int128"));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BlockToArrow.fill(root, block);
+            VarCharVector w = (VarCharVector) root.getVector("w");
+            assertEquals("0", new String(w.get(0), StandardCharsets.UTF_8));
+            assertEquals(max, new String(w.get(1), StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void bfloat16ColumnReadsAsFloat(BufferAllocator allocator) {
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "b", "BFloat16", new BFloat16Codec(), new Object[] {1.5f, -2.0f}));
+        Schema schema = ClickHouseArrowTypes.schema(List.of("b"), List.of("BFloat16"));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BlockToArrow.fill(root, block);
+            Float4Vector b = (Float4Vector) root.getVector("b");
+            assertEquals(1.5f, b.get(0));
+            assertEquals(-2.0f, b.get(1));
+        }
+    }
+
+    @Test
+    void time64ColumnReadsAsDuration(BufferAllocator allocator) {
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "t", "Time64(3)", new Time64Codec(3),
+                new Object[] {Duration.ofMillis(1500), Duration.ofSeconds(90)}));
+        Schema schema = ClickHouseArrowTypes.schema(List.of("t"), List.of("Time64(3)"));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BlockToArrow.fill(root, block);
+            DurationVector t = (DurationVector) root.getVector("t");
+            assertEquals(TimeUnit.MILLISECOND, ((ArrowType.Duration) t.getField().getType()).getUnit());
+            assertEquals(Duration.ofMillis(1500), t.getObject(0));
+            assertEquals(Duration.ofSeconds(90), t.getObject(1));
+        }
+    }
+
+    @Test
+    void intervalMonthColumnReadsAsTotalMonths(BufferAllocator allocator) {
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "i", "IntervalMonth", new IntervalCodec(IntervalCodec.Unit.MONTH),
+                new Object[] {Period.ofMonths(14), Period.ofYears(2)}));
+        Schema schema = ClickHouseArrowTypes.schema(List.of("i"), List.of("IntervalMonth"));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BlockToArrow.fill(root, block);
+            IntervalYearVector i = (IntervalYearVector) root.getVector("i");
+            assertEquals(14, i.get(0));
+            assertEquals(24, i.get(1));
+        }
+    }
+
+    @Test
+    void nothingColumnReadsAsAllNull(BufferAllocator allocator) {
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "n", "Nothing", new NothingCodec(), new Object[] {null, null, null}));
+        Schema schema = ClickHouseArrowTypes.schema(List.of("n"), List.of("Nothing"));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            BlockToArrow.fill(root, block);
+            NullVector n = (NullVector) root.getVector("n");
+            assertEquals(3, n.getValueCount());
+            assertTrue(n.isNull(0));
+            assertTrue(n.isNull(2));
+        }
     }
 }

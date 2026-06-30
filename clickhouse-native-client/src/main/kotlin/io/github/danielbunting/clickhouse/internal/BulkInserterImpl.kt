@@ -62,6 +62,13 @@ internal constructor(
      * (the typed [ColumnBinder] fast path, which needs a POJO, is disabled).
      */
     private val mapperFactory: RowMapperFactory<T>? = null,
+    /**
+     * Explicit target column list. When non-null the INSERT names these columns
+     * (`INSERT INTO t (a, b) VALUES`), so the sample block — and thus the inserted set — is
+     * restricted to them and any omitted column takes its server-side DEFAULT. When null all of
+     * the table's insertable columns are used.
+     */
+    private val insertColumns: List<String>? = null,
 ) : BulkInserter<T> {
 
     private val client: NativeClient
@@ -171,7 +178,10 @@ internal constructor(
 
     /** Performs the actual init I/O; the connection guard is already held. */
     private fun initLocked() {
-        client.sendQuery("INSERT INTO " + table + " VALUES")
+        val columnClause = insertColumns
+            ?.joinToString(", ", " (", ")") { "`" + it + "`" }
+            ?: ""
+        client.sendQuery("INSERT INTO " + table + columnClause + " VALUES")
 
         val sample = readSampleBlock()
         val columnCount = sample.columnCount()
@@ -309,10 +319,16 @@ internal constructor(
                 val col = columns[i]!!
                 val value = rowScratch[i]
                 val nulls = col.nulls()
-                if (value == null && nulls != null) {
-                    nulls[r] = true
-                    // Leave the value slot at the codec's default; it is masked by the null-map.
-                    continue
+                if (value == null) {
+                    if (nulls != null) {
+                        nulls[r] = true
+                        // Leave the value slot at the codec's default; it is masked by the null-map.
+                        continue
+                    }
+                    // A non-nullable column cannot store null; fail clearly rather than letting the
+                    // codec NPE while unboxing (or silently coerce, e.g. Array -> []).
+                    throw IllegalArgumentException(
+                        "Cannot insert null into non-nullable column '" + col.name() + "'")
                 }
                 if (nulls != null) {
                     nulls[r] = false

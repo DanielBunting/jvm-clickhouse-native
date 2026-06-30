@@ -70,6 +70,15 @@ internal class PooledConnection(
         return delegate.createBulkInserter(table, type)
     }
 
+    override fun <T> createBulkInserter(
+        table: String,
+        type: Class<T>,
+        columns: List<String>?,
+        mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
+    ): BulkInserter<T> {
+        return delegate.createBulkInserter(table, type, columns, mapperFactory)
+    }
+
     override fun queryAsync(sql: String): CompletableFuture<QueryResult> {
         return delegate.queryAsync(sql)
     }

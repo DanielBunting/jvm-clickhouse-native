@@ -11,8 +11,10 @@ import org.apache.arrow.adbc.core.AdbcConnection;
 import org.apache.arrow.adbc.core.AdbcDatabase;
 import org.apache.arrow.adbc.core.AdbcStatement;
 import org.apache.arrow.adbc.core.BulkIngestMode;
+import java.time.Duration;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.DurationVector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -97,6 +99,74 @@ class AdbcIngestRoundTripIT extends AdbcRoundTripBase {
                 assertEquals(3, core.executeScalar("SELECT count() FROM " + table));
                 assertEquals(500, core.executeScalar("SELECT min(id) FROM " + table));
             }
+        } finally {
+            database.close();
+        }
+    }
+
+    @Test
+    @DisplayName("CREATE_APPEND creates the table on first use, then appends on the second")
+    void createAppendCreatesThenAppends(BufferAllocator allocator) throws Exception {
+        String table = uniqueTable("adbc_create_append");
+        AdbcDatabase database = new ChAdbcDriver(allocator).open(connectParams());
+        try (AdbcConnection connection = database.connect()) {
+            // First call: table is absent, so CREATE_APPEND builds it from the Arrow schema and inserts.
+            ingestSimple(connection, allocator, table, BulkIngestMode.CREATE_APPEND, 0, 4);
+            // Second call: table now exists; CREATE_APPEND must append (not error like CREATE would).
+            ingestSimple(connection, allocator, table, BulkIngestMode.CREATE_APPEND, 100, 6);
+
+            try (ClickHouseConnection core = ClickHouseConnection.open(coreConfig())) {
+                assertEquals(10, core.executeScalar("SELECT count() FROM " + table), "both batches retained");
+                assertEquals(0, core.executeScalar("SELECT min(id) FROM " + table));
+                assertEquals(105, core.executeScalar("SELECT max(id) FROM " + table));
+            }
+        } finally {
+            database.close();
+        }
+    }
+
+    @Test
+    @DisplayName("Time64(3) Arrow (DurationVector) → ingest → read back as equal Durations")
+    void ingestTime64RoundTrip(BufferAllocator allocator) throws Exception {
+        String table = uniqueTable("adbc_time64");
+        List<Duration> values = List.of(
+                Duration.ZERO,
+                Duration.ofHours(12).plusMinutes(30).plusSeconds(45).plusMillis(123),
+                Duration.ofHours(100).plusSeconds(1));
+
+        AdbcDatabase database = new ChAdbcDriver(allocator).open(connectParams());
+        try (AdbcConnection connection = database.connect()) {
+            // Gate the experimental Time64 type on this session so the ingest CREATE and read-back see it.
+            try (AdbcStatement set = connection.createStatement()) {
+                set.setSqlQuery("SET enable_time_time64_type = 1");
+                set.executeUpdate();
+            }
+
+            try (VectorSchemaRoot root = VectorSchemaRoot.create(
+                    ClickHouseArrowTypes.schema(List.of("id", "t"), List.of("Int64", "Time64(3)")), allocator)) {
+                BigIntVector id = (BigIntVector) root.getVector("id");
+                DurationVector t = (DurationVector) root.getVector("t");
+                for (int i = 0; i < values.size(); i++) {
+                    id.setSafe(i, i);
+                    t.setSafe(i, values.get(i).toMillis()); // vector unit is MILLISECOND for Time64(3)
+                }
+                id.setValueCount(values.size());
+                t.setValueCount(values.size());
+                root.setRowCount(values.size());
+
+                // CREATE_APPEND builds the Time64 table from the Arrow schema (metadata-preserved), then inserts.
+                try (AdbcStatement ingest = connection.bulkIngest(table, BulkIngestMode.CREATE_APPEND)) {
+                    ingest.bind(root);
+                    assertEquals(values.size(), ingest.executeUpdate().getAffectedRows());
+                }
+            }
+
+            List<List<Object>> actual = viaAdbc(connection, "SELECT t FROM " + table + " ORDER BY id");
+            List<List<Object>> expected = new ArrayList<>();
+            for (Duration d : values) {
+                expected.add(List.of(Canonicalizer.canonical(d)));
+            }
+            assertEquals(expected, actual, "Time64 Arrow → native → Arrow round trip");
         } finally {
             database.close();
         }

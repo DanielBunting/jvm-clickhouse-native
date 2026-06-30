@@ -68,6 +68,12 @@ public class UuidCodec : ColumnCodec<Array<UUID?>> {
             array[row] = value
         } else if (value is String) {
             array[row] = UUID.fromString(value)
+        } else if (value is ByteArray) {
+            // Big-endian 16-byte form (e.g. an Arrow FixedSizeBinary(16) cell): the high 8 bytes
+            // are the most-significant bits, the low 8 the least-significant.
+            require(value.size == 16) { "UUID requires 16 bytes, got " + value.size }
+            val buffer = java.nio.ByteBuffer.wrap(value)
+            array[row] = UUID(buffer.long, buffer.long)
         } else if (value == null) {
             array[row] = null
         } else {

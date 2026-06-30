@@ -2,6 +2,7 @@ package io.github.danielbunting.clickhouse.adbc;
 
 import io.github.danielbunting.clickhouse.protocol.Block;
 import io.github.danielbunting.clickhouse.types.Column;
+import io.github.danielbunting.clickhouse.types.ColumnCodec;
 import io.github.danielbunting.clickhouse.types.codec.Float64Codec;
 import io.github.danielbunting.clickhouse.types.codec.Int32Codec;
 import io.github.danielbunting.clickhouse.types.codec.Int64Codec;
@@ -60,6 +61,23 @@ final class TestBlocks {
         if (nulls != null) {
             column.nulls(nulls);
         }
+        return column;
+    }
+
+    /**
+     * Generic column builder: allocates the codec's backing array and boxes each value in through
+     * {@link ColumnCodec#set}. Lets offline tests exercise any codec (wide ints, Time64, Interval, …)
+     * without a bespoke helper per type.
+     */
+    static <A> Column column(String name, String type, ColumnCodec<A> codec, Object[] values) {
+        A backing = codec.allocate(values.length);
+        for (int i = 0; i < values.length; i++) {
+            codec.set(backing, i, values[i]);
+        }
+        Column column = new Column(name, type);
+        column.codec(codec);
+        column.values(backing);
+        column.rowCount(values.length);
         return column;
     }
 

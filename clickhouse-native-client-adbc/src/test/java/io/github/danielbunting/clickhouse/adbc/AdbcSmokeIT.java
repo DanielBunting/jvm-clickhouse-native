@@ -70,6 +70,29 @@ class AdbcSmokeIT extends AdbcIntegrationTest {
     }
 
     @Test
+    @DisplayName("An empty result still exposes the column schema and yields zero rows")
+    void emptyResultExposesSchemaWithNoRows(BufferAllocator allocator) throws Exception {
+        AdbcDriver driver = new ChAdbcDriver(allocator);
+        try (AdbcDatabase database = driver.open(connectParams());
+                AdbcConnection connection = database.connect();
+                AdbcStatement statement = connection.createStatement()) {
+            statement.setSqlQuery("SELECT toInt64(number) AS n FROM numbers(10) WHERE number < 0");
+
+            long total = 0;
+            try (AdbcStatement.QueryResult result = statement.executeQuery()) {
+                ArrowReader reader = result.getReader();
+                VectorSchemaRoot root = reader.getVectorSchemaRoot();
+                // The schema is known up front from the result header, before any batch is read.
+                assertEquals("n", root.getSchema().getFields().get(0).getName());
+                while (reader.loadNextBatch()) {
+                    total += root.getRowCount();
+                }
+            }
+            assertEquals(0, total, "an empty result must surface no rows");
+        }
+    }
+
+    @Test
     @DisplayName("A multi-block result yields multiple Arrow batches (streaming, not buffered)")
     void streamsMultipleBatches(BufferAllocator allocator) throws Exception {
         int rowCount = 200_000;

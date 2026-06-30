@@ -48,7 +48,9 @@ public class ChAdbcStatement internal constructor(
         val result = try {
             connection.query(sql)
         } catch (e: RuntimeException) {
-            throw AdbcErrors.io("Query failed: ${e.message}", e)
+            // wrap (not io) so an UnsupportedTypeException (e.g. an AggregateFunction state column)
+            // surfaces as NOT_IMPLEMENTED; every other failure still maps to IO.
+            throw AdbcErrors.wrap("Query failed", e)
         }
         val readerAllocator =
             connectionAllocator.newChildAllocator("adbc-reader", 0, Long.MAX_VALUE)
@@ -56,9 +58,14 @@ public class ChAdbcStatement internal constructor(
             val schema = ClickHouseArrowTypes.schema(result.columnNames(), result.columnTypes())
             BlockArrowReader(readerAllocator, result, schema)
         } catch (t: Throwable) {
-            result.close()
-            readerAllocator.close()
-            throw t
+            // Free both resources even if closing the result throws, then surface a clean
+            // AdbcException (e.g. an unsupported column type becomes NOT_IMPLEMENTED).
+            try {
+                result.close()
+            } finally {
+                readerAllocator.close()
+            }
+            throw AdbcErrors.wrap("Query failed", t)
         }
         // Affected-row count is not meaningful for a SELECT; ADBC uses -1 for "unknown".
         return AdbcStatement.QueryResult(-1, reader)

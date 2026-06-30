@@ -230,6 +230,15 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
     override fun <T> createBulkInserter(
         table: String,
         type: Class<T>,
+        columns: List<String>?,
+        mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
+    ): BulkInserter<T> {
+        return BulkInserterImpl(client, table, type, batchSize(), guard, mapperFactory, columns)
+    }
+
+    override fun <T> createBulkInserter(
+        table: String,
+        type: Class<T>,
         mapperFactory: io.github.danielbunting.clickhouse.mapping.RowMapperFactory<T>,
     ): BulkInserter<T> {
         return BulkInserterImpl(client, table, type, batchSize(), guard, mapperFactory)

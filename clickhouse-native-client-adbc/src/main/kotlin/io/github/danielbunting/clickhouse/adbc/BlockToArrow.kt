@@ -10,11 +10,14 @@ import org.apache.arrow.vector.BitVector
 import org.apache.arrow.vector.DateDayVector
 import org.apache.arrow.vector.Decimal256Vector
 import org.apache.arrow.vector.DecimalVector
+import org.apache.arrow.vector.DurationVector
 import org.apache.arrow.vector.FieldVector
 import org.apache.arrow.vector.FixedSizeBinaryVector
 import org.apache.arrow.vector.Float4Vector
 import org.apache.arrow.vector.Float8Vector
 import org.apache.arrow.vector.IntVector
+import org.apache.arrow.vector.IntervalYearVector
+import org.apache.arrow.vector.NullVector
 import org.apache.arrow.vector.SmallIntVector
 import org.apache.arrow.vector.TimeStampMicroTZVector
 import org.apache.arrow.vector.TimeStampMilliTZVector
@@ -30,12 +33,15 @@ import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.complex.ListVector
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.complex.StructVector
+import org.apache.arrow.vector.types.TimeUnit
 import java.math.BigDecimal
-import java.net.Inet6Address
+import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
+import java.time.Period
 import java.util.UUID
 
 /**
@@ -100,6 +106,11 @@ public object BlockToArrow {
             is TimeStampNanoTZVector -> forEach(rows, vector, nullAt) { r -> vector.setSafe(r, scaledTicks(column, r, 9)) }
             is DecimalVector -> forEach(rows, vector, nullAt) { r -> vector.setSafe(r, column.value(r) as BigDecimal) }
             is Decimal256Vector -> forEach(rows, vector, nullAt) { r -> vector.setSafe(r, column.value(r) as BigDecimal) }
+            // Time/Time64 and non-calendar Intervals box to Duration; calendar Intervals box to Period.
+            is DurationVector -> forEach(rows, vector, nullAt) { r -> vector.setSafe(r, durationToTicks(column.value(r) as Duration, vector.unit)) }
+            is IntervalYearVector -> forEach(rows, vector, nullAt) { r -> vector.setSafe(r, Math.toIntExact((column.value(r) as Period).toTotalMonths())) }
+            // `Nothing`: the vector carries only nulls, so there is nothing to write.
+            is NullVector -> Unit
             // Nested types use the boxed value (List/Map) and recurse. MapVector extends
             // ListVector, so it must be matched first.
             is MapVector -> forEach(rows, vector, nullAt) { r -> writeBoxed(vector, r, column.value(r)) }
@@ -143,6 +154,9 @@ public object BlockToArrow {
             is TimeStampNanoTZVector -> vector.setSafe(index, instantToTicks(value as Instant, 9))
             is DecimalVector -> vector.setSafe(index, value as BigDecimal)
             is Decimal256Vector -> vector.setSafe(index, value as BigDecimal)
+            is DurationVector -> vector.setSafe(index, durationToTicks(value as Duration, vector.unit))
+            is IntervalYearVector -> vector.setSafe(index, Math.toIntExact((value as Period).toTotalMonths()))
+            is NullVector -> vector.setNull(index)
             is MapVector -> writeMap(vector, index, value as Map<*, *>)
             is ListVector -> writeList(vector, index, value as List<*>)
             is StructVector -> writeStruct(vector, index, value as List<*>)
@@ -185,10 +199,35 @@ public object BlockToArrow {
 
     private fun fixedBytesOf(value: Any, width: Int): ByteArray = when (value) {
         is UUID -> ByteBuffer.allocate(16).putLong(value.mostSignificantBits).putLong(value.leastSignificantBits).array()
-        is Inet6Address -> value.address
+        // An IPv6 column can hold an IPv4-mapped address (e.g. toIPv6('1.2.3.4') = ::ffff:1.2.3.4);
+        // the JDK decodes such 16-byte values to an Inet4Address. Re-widen to the 16-byte form.
+        is InetAddress -> normalizeAddress(value.address, width)
         is String -> padTo(value.toByteArray(StandardCharsets.UTF_8), width)
         is ByteArray -> padTo(value, width)
         else -> throw UnsupportedOperationException("Cannot convert ${value.javaClass} to FixedSizeBinary($width)")
+    }
+
+    /** Widens a 4-byte IPv4 address to its IPv4-mapped IPv6 form when [width] is 16. */
+    private fun normalizeAddress(address: ByteArray, width: Int): ByteArray {
+        if (address.size == width) {
+            return address
+        }
+        if (address.size == 4 && width == 16) {
+            val mapped = ByteArray(16)
+            mapped[10] = 0xFF.toByte()
+            mapped[11] = 0xFF.toByte()
+            System.arraycopy(address, 0, mapped, 12, 4)
+            return mapped
+        }
+        return padTo(address, width)
+    }
+
+    /** Converts a [Duration] (a span, possibly &gt;24h) to ticks at the Arrow vector's [TimeUnit]. */
+    private fun durationToTicks(d: Duration, unit: TimeUnit): Long = when (unit) {
+        TimeUnit.SECOND -> d.seconds
+        TimeUnit.MILLISECOND -> d.toMillis()
+        TimeUnit.MICROSECOND -> Math.addExact(Math.multiplyExact(d.seconds, POW10[6]), d.nano.toLong() / POW10[3])
+        TimeUnit.NANOSECOND -> Math.addExact(Math.multiplyExact(d.seconds, POW10[9]), d.nano.toLong())
     }
 
     /** Converts an [Instant] to ticks at exponent `unitExponent` (6=micro, 9=nano). */
