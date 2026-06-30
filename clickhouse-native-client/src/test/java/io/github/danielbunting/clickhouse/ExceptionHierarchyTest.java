@@ -83,14 +83,38 @@ class ExceptionHierarchyTest {
     }
 
     // ------------------------------------------------------------------
-    // Catch-as-base-type: all three are catchable as ClickHouseException.
+    // UnsupportedTypeException
     // ------------------------------------------------------------------
 
     @Test
-    void allThreeAreCatchableAsClickHouseException() {
+    void unsupportedTypeExceptionIsClickHouseException() {
+        assertInstanceOf(ClickHouseException.class, new UnsupportedTypeException("type"));
+    }
+
+    @Test
+    void unsupportedTypeExceptionPreservesMessage() {
+        UnsupportedTypeException ex = new UnsupportedTypeException("Unsupported ClickHouse type: Bogus");
+        assertEquals("Unsupported ClickHouse type: Bogus", ex.getMessage());
+    }
+
+    @Test
+    void unsupportedTypeExceptionPreservesMessageAndCause() {
+        Throwable cause = new IllegalStateException("opaque state");
+        UnsupportedTypeException ex = new UnsupportedTypeException("AggregateFunction not supported", cause);
+        assertEquals("AggregateFunction not supported", ex.getMessage());
+        assertSame(cause, ex.getCause());
+    }
+
+    // ------------------------------------------------------------------
+    // Catch-as-base-type: all are catchable as ClickHouseException.
+    // ------------------------------------------------------------------
+
+    @Test
+    void allAreCatchableAsClickHouseException() {
         assertCatchable(new ConnectionException("c"));
         assertCatchable(new ProtocolException("p"));
         assertCatchable(new ConfigurationException("f"));
+        assertCatchable(new UnsupportedTypeException("u"));
     }
 
     private void assertCatchable(ClickHouseException ex) {
