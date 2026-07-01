@@ -3,6 +3,7 @@ package io.github.danielbunting.clickhouse.jdbc;
 import io.github.danielbunting.clickhouse.QueryResult;
 import io.github.danielbunting.clickhouse.protocol.Block;
 import io.github.danielbunting.clickhouse.types.Column;
+import io.github.danielbunting.clickhouse.types.codec.UInt64Codec;
 
 import java.io.InputStream;
 import java.io.Reader;
@@ -140,6 +141,13 @@ final class ChResultSet implements ResultSet {
         Column column = currentBlock.column(columnIndex - 1);
         Object value = column.value(rowInBlock);
         wasNull = (value == null);
+        // UInt64 boxes as a raw signed long; the logical/boxed accessors (getObject,
+        // getString, getBigDecimal, ...) that flow through here surface its true unsigned
+        // value as a BigInteger, matching the Types.NUMERIC metadata. The primitive
+        // getLong/getInt path reads col.longAt() directly and keeps the raw-bits contract.
+        if (value instanceof Long l && column.codec() instanceof UInt64Codec) {
+            return JdbcValues.unsignedLong(l);
+        }
         return value;
     }
 

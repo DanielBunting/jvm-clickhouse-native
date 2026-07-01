@@ -171,6 +171,32 @@ class ChResultSetPrimitiveTest {
     }
 
     @Test
+    void uint64_boxedAccessors_returnUnsignedBigInteger() throws SQLException {
+        UInt64Codec codec = new UInt64Codec();
+        long[] a = codec.allocate(1);
+        a[0] = 0x8000_0000_0000_0001L; // 2^63 + 1, high bit set -> negative as a signed long
+        ChResultSet rs = single(col("c", "UInt64", codec, a, 1));
+        java.math.BigInteger expected = new java.math.BigInteger("9223372036854775809");
+        // The logical/boxed accessors surface the true unsigned value (Types.NUMERIC).
+        assertEquals(expected, rs.getObject(1), "getObject returns the unsigned BigInteger");
+        assertEquals(java.math.BigInteger.class, rs.getObject(1).getClass());
+        assertEquals("9223372036854775809", rs.getString(1), "getString is unsigned");
+        assertEquals(new java.math.BigDecimal(expected), rs.getBigDecimal(1), "getBigDecimal is unsigned");
+        // getLong keeps the raw-bits contract (covered above) — the two paths intentionally differ.
+        assertEquals(0x8000_0000_0000_0001L, rs.getLong(1));
+    }
+
+    @Test
+    void uint64_smallValue_getObjectIsBigIntegerNotNegative() throws SQLException {
+        UInt64Codec codec = new UInt64Codec();
+        long[] a = codec.allocate(1);
+        a[0] = 42L;
+        ChResultSet rs = single(col("c", "UInt64", codec, a, 1));
+        assertEquals(new java.math.BigInteger("42"), rs.getObject(1),
+                "small UInt64 values also box as BigInteger for a consistent column class");
+    }
+
+    @Test
     void float32_getDouble_getFloat() throws SQLException {
         Float32Codec codec = new Float32Codec();
         float[] a = codec.allocate(1);

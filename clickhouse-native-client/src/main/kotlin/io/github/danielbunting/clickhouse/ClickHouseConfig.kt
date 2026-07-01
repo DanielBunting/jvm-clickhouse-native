@@ -760,18 +760,39 @@ public class ClickHouseConfig private constructor(b: Builder) {
                 }
                 val host: String
                 var port = 9000
-                val colon = trimmed.lastIndexOf(':')
-                if (colon >= 0) {
-                    host = trimmed.substring(0, colon)
+                // A bracketed IPv6 literal ("[::1]" or "[::1]:9000") must not be split on
+                // its internal colons: only a ':' *after* the closing ']' introduces a port.
+                val portColon: Int
+                if (trimmed.startsWith("[")) {
+                    val close = trimmed.indexOf(']')
+                    if (close < 0) {
+                        throw ClickHouseException(
+                            "Unterminated IPv6 host in endpoint '$trimmed' of URL: $url"
+                        )
+                    }
+                    host = trimmed.substring(1, close)
+                    if (close + 1 == trimmed.length) {
+                        portColon = -1
+                    } else if (trimmed[close + 1] == ':') {
+                        portColon = close + 1
+                    } else {
+                        // Reject trailing junk after "]" that isn't a ":port".
+                        throw ClickHouseException(
+                            "Invalid IPv6 endpoint '$trimmed' of URL: $url"
+                        )
+                    }
+                } else {
+                    portColon = trimmed.lastIndexOf(':')
+                    host = if (portColon >= 0) trimmed.substring(0, portColon) else trimmed
+                }
+                if (portColon >= 0) {
                     try {
-                        port = Integer.parseInt(trimmed.substring(colon + 1))
+                        port = Integer.parseInt(trimmed.substring(portColon + 1))
                     } catch (e: NumberFormatException) {
                         throw ClickHouseException(
                             "Invalid port in endpoint '$trimmed' of URL: $url", e
                         )
                     }
-                } else {
-                    host = trimmed
                 }
                 result.add(Endpoint(host, port))
             }
@@ -787,7 +808,10 @@ public class ClickHouseConfig private constructor(b: Builder) {
          * from our own parse.
          */
         private fun rewriteToSingleHost(url: String, hostList: String, first: Endpoint): String {
-            return url.replaceFirst(hostList, "${first.host}:${first.port}")
+            // Re-bracket an IPv6 literal (bare "::1" from our parse) so the JDK URI parser,
+            // which we borrow only for userinfo/path/query, accepts the rewritten authority.
+            val host = if (first.host.contains(':')) "[${first.host}]" else first.host
+            return url.replaceFirst(hostList, "$host:${first.port}")
         }
 
         /**

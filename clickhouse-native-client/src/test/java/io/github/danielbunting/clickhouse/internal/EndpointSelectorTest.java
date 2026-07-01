@@ -1,8 +1,10 @@
 package io.github.danielbunting.clickhouse.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.github.danielbunting.clickhouse.ClickHouseConfig;
+import io.github.danielbunting.clickhouse.ClickHouseException;
 import io.github.danielbunting.clickhouse.Endpoint;
 import io.github.danielbunting.clickhouse.LoadBalancingPolicy;
 import java.util.List;
@@ -29,6 +31,69 @@ class EndpointSelectorTest {
                 "all comma-separated endpoints parsed, default port 9000 applied");
         assertEquals("user", cfg.username());
         assertEquals("db", cfg.database());
+    }
+
+    @Test
+    void trimsWhitespaceAndSkipsEmptyEndpoints() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl(
+                "chnative://h1:9000, h2:9001 ,,h3/db");
+
+        assertEquals(
+                List.of(new Endpoint("h1", 9000), new Endpoint("h2", 9001), new Endpoint("h3", 9000)),
+                cfg.endpoints(),
+                "surrounding whitespace trimmed and empty segments skipped");
+    }
+
+    @Test
+    void parsesBracketedIpv6HostWithPort() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[2001:db8::1]:9000/db");
+
+        assertEquals(
+                List.of(new Endpoint("2001:db8::1", 9000)),
+                cfg.endpoints(),
+                "bracketed IPv6 literal keeps its internal colons; only the trailing :port is the port");
+    }
+
+    @Test
+    void parsesBracketedIpv6HostWithoutPortDefaultsTo9000() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[::1]/db");
+
+        assertEquals(
+                List.of(new Endpoint("::1", 9000)),
+                cfg.endpoints(),
+                "bracketed IPv6 literal without an explicit port defaults to 9000, not mis-parsed");
+    }
+
+    @Test
+    void parsesMixedIpv6AndIpv4EndpointList() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[::1]:9000,10.0.0.5:9001/db");
+
+        assertEquals(
+                List.of(new Endpoint("::1", 9000), new Endpoint("10.0.0.5", 9001)),
+                cfg.endpoints());
+    }
+
+    @Test
+    void loadBalancingPolicyParsedFromUrlCaseInsensitively() {
+        assertEquals(
+                LoadBalancingPolicy.ROUND_ROBIN,
+                ClickHouseConfig.fromUrl("chnative://h1,h2/db?loadBalancingPolicy=RoundRobin")
+                        .loadBalancingPolicy());
+        assertEquals(
+                LoadBalancingPolicy.RANDOM,
+                ClickHouseConfig.fromUrl("chnative://h1,h2/db?loadBalancingPolicy=random")
+                        .loadBalancingPolicy());
+        assertEquals(
+                LoadBalancingPolicy.FIRST_ALIVE,
+                ClickHouseConfig.fromUrl("chnative://h1,h2/db?loadBalancingPolicy=first_alive")
+                        .loadBalancingPolicy());
+    }
+
+    @Test
+    void unknownLoadBalancingPolicyThrows() {
+        assertThrows(
+                ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative://h1,h2/db?loadBalancingPolicy=bogus"));
     }
 
     @Test

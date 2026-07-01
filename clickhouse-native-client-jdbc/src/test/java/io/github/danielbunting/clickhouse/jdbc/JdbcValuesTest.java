@@ -311,20 +311,26 @@ class JdbcValuesTest {
 
         @Test
         void integers() {
+            // Unsigned types widen to the next signed JDBC type that holds their full
+            // range, matching upstream clickhouse-java (jdbc-v2 JdbcUtils).
             assertEquals(Types.TINYINT, JdbcValues.sqlType("Int8"));
             assertEquals(Types.SMALLINT, JdbcValues.sqlType("UInt8"));
             assertEquals(Types.SMALLINT, JdbcValues.sqlType("Int16"));
-            assertEquals(Types.SMALLINT, JdbcValues.sqlType("UInt16"));
+            assertEquals(Types.INTEGER, JdbcValues.sqlType("UInt16"));
             assertEquals(Types.INTEGER, JdbcValues.sqlType("Int32"));
             assertEquals(Types.BIGINT, JdbcValues.sqlType("UInt32"));
             assertEquals(Types.BIGINT, JdbcValues.sqlType("Int64"));
-            assertEquals(Types.BIGINT, JdbcValues.sqlType("UInt64"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt64"));
         }
 
         @Test
-        void wideIntegersAreDecimal() {
-            assertEquals(Types.DECIMAL, JdbcValues.sqlType("Int128"));
-            assertEquals(Types.DECIMAL, JdbcValues.sqlType("UInt256"));
+        void wideIntegersAreNumeric() {
+            // 128/256-bit ints exceed long and box as BigInteger, so they map to NUMERIC
+            // (BigInteger), matching upstream clickhouse-java.
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("Int128"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt128"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("Int256"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt256"));
         }
 
         @Test
