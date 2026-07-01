@@ -112,11 +112,13 @@ public class QueryParameters private constructor(
 
         /**
          * Sub-second variant used when a temporal value carries a non-zero fractional
-         * part, so `DateTime64` precision survives the round trip. Whole-second values
+         * part, so `DateTime64` precision survives the round trip. Nine fractional
+         * digits (nanoseconds) match the codec's maximum `DateTime64(9)`; ClickHouse
+         * truncates the extra digits for lower-precision columns. Whole-second values
          * keep the terse [DATETIME_FORMAT] form.
          */
         private val DATETIME_FRAC_FORMAT: DateTimeFormatter =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS")
 
         private fun formatDateTime(ldt: LocalDateTime): String =
             (if (ldt.nano != 0) DATETIME_FRAC_FORMAT else DATETIME_FORMAT).format(ldt)

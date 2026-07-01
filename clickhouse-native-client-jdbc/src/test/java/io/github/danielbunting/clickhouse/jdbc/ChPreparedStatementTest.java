@@ -227,12 +227,13 @@ class ChPreparedStatementTest {
         assertEquals("'192.168.0.1'", ChPreparedStatement.toLiteral(v4));
     }
 
-    /** Sub-second timestamps keep their fractional part. Regression for #612 (DateTime64). */
+    /** Sub-second timestamps keep their fractional part to nanoseconds. Regression for #612. */
     @Test
     void rendersFractionalTimestampLiteral() {
-        Timestamp ts = Timestamp.valueOf("2026-05-30 13:45:07.123456");
-        assertEquals("'2026-05-30 13:45:07.123456'", ChPreparedStatement.toLiteral(ts));
-        // Whole-second values stay terse (no trailing .000000).
+        // Nanosecond precision (DateTime64(9)) is preserved: nine fractional digits.
+        Timestamp ts = Timestamp.valueOf("2026-05-30 13:45:07.123456789");
+        assertEquals("'2026-05-30 13:45:07.123456789'", ChPreparedStatement.toLiteral(ts));
+        // Whole-second values stay terse (no trailing .000000000).
         Timestamp whole = Timestamp.valueOf("2026-05-30 13:45:07");
         assertEquals("'2026-05-30 13:45:07'", ChPreparedStatement.toLiteral(whole));
     }

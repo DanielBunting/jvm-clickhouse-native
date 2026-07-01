@@ -41,10 +41,11 @@ class QueryParametersToTextTest {
     void dateTimeKeepsFractionOnlyWhenPresent() {
         assertEquals("2026-05-30 13:45:07",
                 QueryParameters.toText(Timestamp.valueOf("2026-05-30 13:45:07")));
-        assertEquals("2026-05-30 13:45:07.123456",
-                QueryParameters.toText(Timestamp.valueOf("2026-05-30 13:45:07.123456")));
-        assertEquals("2026-05-30 13:45:07.123456",
-                QueryParameters.toText(Instant.parse("2026-05-30T13:45:07.123456Z")));
+        // Nanosecond precision (DateTime64(9)) is preserved: nine fractional digits.
+        assertEquals("2026-05-30 13:45:07.123456789",
+                QueryParameters.toText(Timestamp.valueOf("2026-05-30 13:45:07.123456789")));
+        assertEquals("2026-05-30 13:45:07.123456789",
+                QueryParameters.toText(Instant.parse("2026-05-30T13:45:07.123456789Z")));
         assertEquals("2026-05-30 13:45:07",
                 QueryParameters.toText(LocalDateTime.of(2026, 5, 30, 13, 45, 7)));
     }

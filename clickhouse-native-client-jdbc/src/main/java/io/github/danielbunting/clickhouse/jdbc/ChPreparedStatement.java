@@ -66,10 +66,12 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
 
     /**
      * Sub-second variant used when a temporal binding carries a non-zero fractional
-     * part, so {@code DateTime64} precision survives client-side interpolation.
+     * part, so {@code DateTime64} precision survives client-side interpolation. Nine
+     * fractional digits (nanoseconds) match the codec's maximum {@code DateTime64(9)};
+     * ClickHouse truncates the extra digits for lower-precision columns.
      */
     private static final DateTimeFormatter TIMESTAMP_FRAC_FORMAT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS");
 
     /** Generated parameter-name prefix for the server-side rewrite: {@code _p1, _p2, …}. */
     static final String PARAM_NAME_PREFIX = "_p";
@@ -231,10 +233,11 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
 
     /**
      * Formats a temporal value as a ClickHouse date-time literal, appending a
-     * six-digit fractional part only when the value carries sub-second precision.
+     * nine-digit (nanosecond) fractional part only when the value carries sub-second
+     * precision.
      *
      * @param ldt the local date-time
-     * @return {@code yyyy-MM-dd HH:mm:ss[.SSSSSS]}
+     * @return {@code yyyy-MM-dd HH:mm:ss[.SSSSSSSSS]}
      */
     static String formatDateTime(LocalDateTime ldt) {
         return (ldt.getNano() != 0 ? TIMESTAMP_FRAC_FORMAT : TIMESTAMP_FORMAT).format(ldt);
