@@ -1003,7 +1003,9 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
     @Override
     public ResultSet getTableTypes() throws SQLException {
         return runMeta(
-                "SELECT 'TABLE' AS TABLE_TYPE UNION ALL SELECT 'VIEW' ORDER BY TABLE_TYPE");
+                "SELECT TABLE_TYPE FROM ("
+                + "SELECT 'TABLE' AS TABLE_TYPE UNION ALL SELECT 'VIEW' AS TABLE_TYPE"
+                + ") ORDER BY TABLE_TYPE");
     }
 
     /**
