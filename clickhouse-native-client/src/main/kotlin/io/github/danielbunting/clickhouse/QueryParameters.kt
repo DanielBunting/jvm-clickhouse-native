@@ -111,6 +111,17 @@ public class QueryParameters private constructor(
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
         /**
+         * Sub-second variant used when a temporal value carries a non-zero fractional
+         * part, so `DateTime64` precision survives the round trip. Whole-second values
+         * keep the terse [DATETIME_FORMAT] form.
+         */
+        private val DATETIME_FRAC_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")
+
+        private fun formatDateTime(ldt: LocalDateTime): String =
+            (if (ldt.nano != 0) DATETIME_FRAC_FORMAT else DATETIME_FORMAT).format(ldt)
+
+        /**
          * Builds a parameter set from a name → value map, converting each value to its
          * ClickHouse textual form via [toText]. Iteration order of the
          * supplied map is preserved.
@@ -152,12 +163,15 @@ public class QueryParameters private constructor(
                 is BigDecimal -> value.toPlainString()
                 is Number, is BigInteger -> value.toString()
                 is ByteArray -> String(value, StandardCharsets.UTF_8)
-                is java.sql.Timestamp -> DATETIME_FORMAT.format(value.toLocalDateTime())
-                is Instant -> DATETIME_FORMAT.format(LocalDateTime.ofInstant(value, ZoneOffset.UTC))
-                is LocalDateTime -> DATETIME_FORMAT.format(value)
+                is java.sql.Timestamp -> formatDateTime(value.toLocalDateTime())
+                is Instant -> formatDateTime(LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+                is LocalDateTime -> formatDateTime(value)
                 is java.sql.Date -> value.toLocalDate().toString()
                 is LocalDate -> value.toString()
                 is UUID -> value.toString()
+                // IPv4/IPv6: the canonical numeric address, which the server casts to
+                // IPv4/IPv6 (java.net.InetAddress.toString() would prepend the hostname).
+                is java.net.InetAddress -> value.hostAddress
                 // String and any other reference type: its textual representation. The server
                 // casts this to the placeholder's declared type, so no SQL quoting is applied.
                 else -> value.toString()

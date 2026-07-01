@@ -181,4 +181,80 @@ class ChPreparedStatementTest {
                 new ChPreparedStatement(conn(core), "INSERT INTO t (x) VALUES (?)");
         assertThrows(SQLException.class, () -> ps.setInt(2, 1));
     }
+
+    // ---- issue regressions (distributed slices; see ChJdbcIssuesTest) --------
+
+    /**
+     * A {@code Collection}/array binding renders as a ClickHouse array literal.
+     * Regression for clickhouse-java#2329 (write an Array(String) via setObject).
+     */
+    @Test
+    void rendersArrayLiteralFromCollection() {
+        assertEquals("['a','b']", ChPreparedStatement.toLiteral(List.of("a", "b")));
+        assertEquals("[1,2,3]", ChPreparedStatement.toLiteral(List.of(1, 2, 3)));
+        assertEquals("[]", ChPreparedStatement.toLiteral(List.of()));
+        // Nested arrays recurse.
+        assertEquals("[[1,2],[3]]", ChPreparedStatement.toLiteral(List.of(List.of(1, 2), List.of(3))));
+        // Java arrays are handled like collections.
+        assertEquals("[1,2]", ChPreparedStatement.toLiteral(new int[] {1, 2}));
+    }
+
+    /** setObject(collection) flows an array literal end-to-end. Regression for #2329. */
+    @Test
+    void setObjectCollectionRendersArrayLiteralEndToEnd() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps = new ChPreparedStatement(
+                conn(core), "INSERT INTO t (id, arr) VALUES (?, ?)");
+        ps.setString(1, "id01");
+        ps.setObject(2, List.of("x", "y"));
+        ps.executeUpdate();
+        assertEquals("INSERT INTO t (id, arr) VALUES ('id01', ['x','y'])", core.executed.get(0));
+    }
+
+    /** UUID binds as a quoted string literal ClickHouse casts to UUID. Regression for #2327. */
+    @Test
+    void rendersUuidLiteral() {
+        java.util.UUID uuid = java.util.UUID.fromString("61f0c404-5cb3-11e7-907b-a6006ad3dba0");
+        assertEquals("'61f0c404-5cb3-11e7-907b-a6006ad3dba0'", ChPreparedStatement.toLiteral(uuid));
+    }
+
+    /** IPv6/IPv4 bind as the canonical numeric address, quoted. Regression for #315. */
+    @Test
+    void rendersInetAddressLiteral() throws Exception {
+        java.net.InetAddress v6 = java.net.InetAddress.getByName("2001:db8::1");
+        assertEquals("'" + v6.getHostAddress() + "'", ChPreparedStatement.toLiteral(v6));
+        java.net.InetAddress v4 = java.net.InetAddress.getByName("192.168.0.1");
+        assertEquals("'192.168.0.1'", ChPreparedStatement.toLiteral(v4));
+    }
+
+    /** Sub-second timestamps keep their fractional part. Regression for #612 (DateTime64). */
+    @Test
+    void rendersFractionalTimestampLiteral() {
+        Timestamp ts = Timestamp.valueOf("2026-05-30 13:45:07.123456");
+        assertEquals("'2026-05-30 13:45:07.123456'", ChPreparedStatement.toLiteral(ts));
+        // Whole-second values stay terse (no trailing .000000).
+        Timestamp whole = Timestamp.valueOf("2026-05-30 13:45:07");
+        assertEquals("'2026-05-30 13:45:07'", ChPreparedStatement.toLiteral(whole));
+    }
+
+    /**
+     * A {@code null} bound on one row of a batch does not throw and renders as NULL.
+     * Regression for clickhouse-java#1373.
+     */
+    @Test
+    void nullInBatchDoesNotThrowAndRendersNull() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps = new ChPreparedStatement(
+                conn(core), "INSERT INTO t (a, b) VALUES (?, ?)");
+        ps.setString(1, "r1a");
+        ps.setString(2, "r1b");
+        ps.addBatch();
+        ps.setString(1, "r2a");
+        ps.setString(2, null); // null mid-batch
+        ps.addBatch();
+
+        int[] counts = ps.executeBatch();
+        assertEquals(2, counts.length);
+        assertEquals("INSERT INTO t (a, b) VALUES ('r1a', 'r1b'),('r2a', NULL)", core.executed.get(0));
+    }
 }

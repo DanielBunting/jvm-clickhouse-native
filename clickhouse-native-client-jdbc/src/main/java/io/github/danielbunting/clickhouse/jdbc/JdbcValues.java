@@ -242,6 +242,82 @@ final class JdbcValues {
     }
 
     /**
+     * Renders a value the way ClickHouse displays it, so {@code getString} on a
+     * composite column (Array/Map/Tuple) returns a faithful literal rather than a
+     * Java {@code toString}. Lists render as {@code [e1, e2]}, maps as
+     * {@code {k: v}}, strings are single-quoted (with {@code \} and {@code '}
+     * escaped), numbers/booleans are bare, and other scalars are quoted via their
+     * {@code toString}. Recurses for nested composites.
+     *
+     * @param value the boxed value, may be {@code null}
+     * @return the ClickHouse-style literal, or {@code null} if the input is {@code null}
+     */
+    static String clickHouseLiteral(Object value) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof java.util.List<?> list) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(clickHouseLiteral(list.get(i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (value instanceof java.util.Map<?, ?> map) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (java.util.Map.Entry<?, ?> e : map.entrySet()) {
+                if (!first) {
+                    sb.append(", ");
+                }
+                first = false;
+                sb.append(clickHouseLiteral(e.getKey())).append(": ").append(clickHouseLiteral(e.getValue()));
+            }
+            return sb.append('}').toString();
+        }
+        if (value.getClass().isArray() && !(value instanceof byte[])) {
+            int n = java.lang.reflect.Array.getLength(value);
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(clickHouseLiteral(java.lang.reflect.Array.get(value, i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        String s = String.valueOf(value);
+        StringBuilder sb = new StringBuilder(s.length() + 2).append('\'');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' || c == '\'') {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.append('\'').toString();
+    }
+
+    /**
+     * True when {@code value} is a composite (List/Map/non-byte array) that should be
+     * rendered via {@link #clickHouseLiteral(Object)} by {@code getString}.
+     *
+     * @param value the boxed value, may be {@code null}
+     * @return whether the value is a renderable composite
+     */
+    static boolean isComposite(Object value) {
+        return value instanceof java.util.List
+                || value instanceof java.util.Map
+                || (value != null && value.getClass().isArray() && !(value instanceof byte[]));
+    }
+
+    /**
      * Coerces a {@link LocalDate} (the core's boxing of {@code Date}) to a
      * {@link java.sql.Date}. A {@link java.sql.Date} or {@link Instant} input is
      * also accepted for robustness.

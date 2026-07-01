@@ -176,4 +176,37 @@ class MapTypesIT extends TypeRoundTripBase {
             assertLongValueMap(rows.get(2)[1], Map.of("only", 42L), "Bulk row 3");
         });
     }
+
+    /**
+     * DECODE: {@code Array(Map(LowCardinality(String), String))} with interleaved empty maps.
+     * Regression for clickhouse-java#2657, where empty maps at the start/end of the array
+     * corrupted the offsets and mis-decoded the neighbouring non-empty map.
+     */
+    @Test
+    void arrayOfMapLowCardinalityWithEmptyMapsDecodeRoundTrips() {
+        withTable("arr_map_lc_empty", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table + " ("
+                    + " id UInt32, traits Array(Map(LowCardinality(String), String))"
+                    + ") ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, traits) VALUES"
+                    + " (1, [map(), map('k1','v1','k2','v2'), map(), map()])");
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT id, traits FROM " + table + " ORDER BY id");
+            assertEquals(1, rows.size(), "Expected 1 row");
+
+            List<?> arr = assertInstanceOf(List.class, rows.get(0)[1],
+                    "traits: expected an Array (List) of maps");
+            assertEquals(4, arr.size(), "Expected 4 maps in the array");
+            assertTrue(assertInstanceOf(Map.class, arr.get(0), "map[0]").isEmpty(), "map[0] empty");
+
+            Map<?, ?> m1 = assertInstanceOf(Map.class, arr.get(1), "map[1]");
+            assertEquals(2, m1.size(), "map[1] size");
+            assertEquals("v1", m1.get("k1"), "map[1] k1");
+            assertEquals("v2", m1.get("k2"), "map[1] k2");
+
+            assertTrue(assertInstanceOf(Map.class, arr.get(2), "map[2]").isEmpty(), "map[2] empty");
+            assertTrue(assertInstanceOf(Map.class, arr.get(3), "map[3]").isEmpty(), "map[3] empty");
+        });
+    }
 }

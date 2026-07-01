@@ -201,7 +201,13 @@ final class ChResultSet implements ResultSet {
 
     @Override
     public String getString(int columnIndex) throws SQLException {
-        return JdbcValues.toString(raw(columnIndex));
+        Object v = raw(columnIndex);
+        // Composite columns (Array/Map/Tuple) render as a ClickHouse literal rather
+        // than a Java collection toString (see issue clickhouse-java#2723).
+        if (JdbcValues.isComposite(v)) {
+            return JdbcValues.clickHouseLiteral(v);
+        }
+        return JdbcValues.toString(v);
     }
 
     @Override
@@ -782,12 +788,22 @@ final class ChResultSet implements ResultSet {
 
     @Override
     public Array getArray(int columnIndex) throws SQLException {
-        throw unsupported("getArray");
+        Column col = columnAt(columnIndex);
+        Object v = col.value(rowInBlock);
+        wasNull = (v == null);
+        if (v == null) {
+            return null;
+        }
+        if (!(v instanceof List<?> list)) {
+            throw new SQLException("Column " + columnIndex + " (" + col.type()
+                    + ") is not an array");
+        }
+        return new ChArray(list, ChArray.elementType(col.type()));
     }
 
     @Override
     public Array getArray(String columnLabel) throws SQLException {
-        throw unsupported("getArray");
+        return getArray(findColumn(columnLabel));
     }
 
     @Override
