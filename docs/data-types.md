@@ -131,6 +131,14 @@ See [cross-client-compatibility.md](cross-client-compatibility.md) for round-tri
 
 - **`AggregateFunction(f, T)`** is rejected at type-parse time: its wire format carries opaque, function-specific state with no length framing, so generic decoding is impossible. Finalize the state in SQL instead — e.g. `SELECT sumMerge(col)` — or use `SimpleAggregateFunction`.
 
+## Totals and extremes
+
+`WITH TOTALS` and `extremes = 1` currently surface their rows **inline** in the result
+stream, indistinguishable from data rows (one extra trailing row for totals; two for
+extremes). This is a known limitation — see
+[Cross-client compatibility → Known limitation](cross-client-compatibility.md#known-limitation-with-totals--extremes-surface-as-extra-result-rows)
+for the details, the workaround, and how the official driver differs.
+
 ## Column accessors
 
 Each `Block` column exposes both boxed and unboxed access:

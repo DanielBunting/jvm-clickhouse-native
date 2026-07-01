@@ -200,6 +200,41 @@ recursively.
 
 ---
 
+## Known limitation: `WITH TOTALS` / `extremes` surface as extra result rows
+
+Unlike findings 1–7 (all external), this one is **our** current behavior, recorded
+here because it is a cross-client difference a caller can trip over.
+
+**Behavior.** A `SELECT … WITH TOTALS` or a query run with `extremes = 1` returns its
+totals/extremes rows **inline in the ordinary result stream**, indistinguishable from
+data rows. `QueryResultImpl.pull()` treats the native `TOTALS`/`EXTREMES` server packets
+the same as `DATA` blocks, so:
+
+- `WITH TOTALS` yields **one extra trailing row** — the grouping-key columns hold the
+  type's default (`0`, not `null`, unless the column is `Nullable`), and the aggregate
+  column holds the grand total.
+- `extremes = 1` yields **two extra rows** (min, then max).
+
+The extra rows carry each column's normal decoded Java type — there is no marker. On the
+mapped `query(sql, Class<T>)` path they deserialize into real-looking `T` instances. Only
+queries that opt into these features are affected; ordinary queries are untouched, and the
+connection stays in sync either way (pinned by `SpecialPacketsIT`).
+
+**Cross-client contrast (measured on ClickHouse 25.10).** The official `client-v2` driver
+reads `RowBinaryWithNamesAndTypes`, for which the server emits **no** totals/extremes at all
+— the response is byte-identical with and without `WITH TOTALS` — and `client-v2` exposes
+no `getTotals()`/`getExtremes()` API (that was a v1-only feature). So the official fast path
+**silently drops** totals/extremes, whereas the native protocol delivers them as first-class
+packets. The information is therefore *richer* over native TCP; the limitation here is one of
+**presentation** (folded into the row stream) rather than data loss.
+
+**Workaround.** Avoid `WITH TOTALS` / `extremes` on this client, drop the trailing
+row(s) yourself, or compute totals with a separate aggregate query. A future revision could
+expose `QueryResult.totals()` / `extremes()` and stop folding them into `blocks()` — which
+would be strictly better than the official driver's fast path.
+
+---
+
 ## Coverage matrix
 
 Directions: **A** official→native, **B** native→official, **N** neutral
