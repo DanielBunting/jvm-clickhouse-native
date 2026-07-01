@@ -391,4 +391,79 @@ class JdbcValuesTest {
             assertEquals(Types.OTHER, JdbcValues.sqlType("Tuple(UInt8, String)"));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // clickHouseLiteral / isComposite (getString rendering of composites)
+    // -----------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("clickHouseLiteral")
+    class ClickHouseLiteral {
+
+        @Test
+        void nullRendersAsKeyword() {
+            assertEquals("NULL", JdbcValues.clickHouseLiteral(null));
+        }
+
+        @Test
+        void numbersAndBooleansAreBare() {
+            assertEquals("42", JdbcValues.clickHouseLiteral(42));
+            assertEquals("3.5", JdbcValues.clickHouseLiteral(3.5));
+            assertEquals("true", JdbcValues.clickHouseLiteral(Boolean.TRUE));
+        }
+
+        @Test
+        void stringsAreQuotedAndEscaped() {
+            assertEquals("'hi'", JdbcValues.clickHouseLiteral("hi"));
+            assertEquals("'O\\'Brien'", JdbcValues.clickHouseLiteral("O'Brien"));
+            assertEquals("'a\\\\b'", JdbcValues.clickHouseLiteral("a\\b"));
+        }
+
+        @Test
+        void listsRenderWithSpacedSeparator() {
+            assertEquals("[1, 2, 3]", JdbcValues.clickHouseLiteral(java.util.List.of(1, 2, 3)));
+            assertEquals("['a', 'b']", JdbcValues.clickHouseLiteral(java.util.List.of("a", "b")));
+            assertEquals("[]", JdbcValues.clickHouseLiteral(java.util.List.of()));
+        }
+
+        @Test
+        void nestedListsRecurse() {
+            assertEquals("[[1, 2], [3]]",
+                    JdbcValues.clickHouseLiteral(java.util.List.of(java.util.List.of(1, 2), java.util.List.of(3))));
+        }
+
+        @Test
+        void mapsRenderKeyColonValue() {
+            java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+            m.put("a", 1);
+            m.put("b", 2);
+            assertEquals("{'a': 1, 'b': 2}", JdbcValues.clickHouseLiteral(m));
+        }
+
+        @Test
+        void javaArraysRenderLikeLists() {
+            assertEquals("[1, 2]", JdbcValues.clickHouseLiteral(new int[] {1, 2}));
+            assertEquals("['x', 'y']", JdbcValues.clickHouseLiteral(new String[] {"x", "y"}));
+        }
+    }
+
+    @Nested
+    @DisplayName("isComposite")
+    class IsComposite {
+
+        @Test
+        void trueForListMapAndNonByteArray() {
+            assertTrue(JdbcValues.isComposite(java.util.List.of(1)));
+            assertTrue(JdbcValues.isComposite(new java.util.HashMap<>()));
+            assertTrue(JdbcValues.isComposite(new int[] {1}));
+        }
+
+        @Test
+        void falseForScalarsNullAndByteArray() {
+            assertFalse(JdbcValues.isComposite(null));
+            assertFalse(JdbcValues.isComposite("s"));
+            assertFalse(JdbcValues.isComposite(42));
+            assertFalse(JdbcValues.isComposite(new byte[] {1, 2}));
+        }
+    }
 }

@@ -59,10 +59,26 @@ class ChArrayTest {
     }
 
     @Test
-    void freeIsNoOpAndResultSetUnsupported() throws SQLException {
+    void getArrayWithTypeMapIgnoresMap() throws SQLException {
+        ChArray arr = new ChArray(List.of(1, 2), "Int32");
+        assertArrayEquals(new Object[] {1, 2}, (Object[]) arr.getArray(java.util.Map.of()));
+        assertArrayEquals(new Object[] {2}, (Object[]) arr.getArray(2, 1, java.util.Map.of()));
+    }
+
+    @Test
+    void baseTypeForNonIntElement() {
+        assertEquals("String", new ChArray(List.of("a"), "String").getBaseTypeName());
+        assertEquals(java.sql.Types.VARCHAR, new ChArray(List.of("a"), "String").getBaseType());
+    }
+
+    @Test
+    void freeIsNoOpAndResultSetOverloadsUnsupported() throws SQLException {
         ChArray arr = new ChArray(List.of(1), "Int32");
         arr.free(); // no throw
         assertThrows(SQLFeatureNotSupportedException.class, arr::getResultSet);
+        assertThrows(SQLFeatureNotSupportedException.class, () -> arr.getResultSet(java.util.Map.of()));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> arr.getResultSet(1, 1));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> arr.getResultSet(1, 1, java.util.Map.of()));
     }
 
     @Test

@@ -57,6 +57,15 @@ class ChDataSourceTest {
     }
 
     @Test
+    void getConnectionToUnreachableEndpointThrows() {
+        // Exercises getConnection()/getConnection(user,pass) + the open() delegate path
+        // without a server: a closed local port refuses fast.
+        ChDataSource ds = new ChDataSource("jdbc:chnative://127.0.0.1:1/default");
+        assertThrows(SQLException.class, ds::getConnection);
+        assertThrows(SQLException.class, () -> ds.getConnection("user", "pass"));
+    }
+
+    @Test
     void wrapperContract() throws SQLException {
         ChDataSource ds = new ChDataSource(URL);
         assertTrue(ds.isWrapperFor(DataSource.class));
