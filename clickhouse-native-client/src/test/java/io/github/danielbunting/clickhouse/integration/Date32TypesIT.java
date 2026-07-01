@@ -61,6 +61,29 @@ class Date32TypesIT extends TypeRoundTripBase {
     }
 
     /**
+     * DECODE: the exact display-range endpoints of {@code Date32} — 1900-01-01 (most
+     * negative day offset) and 2299-12-31 (largest). Mirrors the min/max-date boundary
+     * checks in ClickHouse/clickhouse-java's {@code DataTypeTests} (Apache-2.0); the
+     * pre-existing test used 2299-01-01, not the true 2299-12-31 upper bound.
+     */
+    @Test
+    void date32ExactDisplayRangeBoundaries() {
+        LocalDate maxDate = LocalDate.of(2299, 12, 31);
+        withTable("date32_bounds", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table + " (" + COLUMNS
+                    + ") ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (" + SELECT_COLS + ") VALUES "
+                    + "(1, '1900-01-01'), (2, '2299-12-31')");
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT " + SELECT_COLS + " FROM " + table + " ORDER BY id");
+            assertEquals(2, rows.size());
+            assertEquals(D_1900, rows.get(0)[1], "exact lower bound 1900-01-01");
+            assertEquals(maxDate, rows.get(1)[1], "exact upper bound 2299-12-31");
+        });
+    }
+
+    /**
      * ENCODE + MAPPED-READ: client encodes records (LocalDate field), reads back
      * via the block API and {@code query(sql, Class)}.
      */
