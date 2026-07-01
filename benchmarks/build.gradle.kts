@@ -16,6 +16,9 @@ kotlin {
 dependencies {
     // Driver under test.
     jmh(project(":clickhouse-native-client"))
+    // Our JDBC driver under test, built from local source (contrast against the
+    // Maven-published official clickhouse-jdbc below).
+    jmh(project(":clickhouse-native-client-jdbc"))
     // Kotlin coroutine/Flow layer under test (transitively brings kotlin-stdlib + coroutines).
     jmh(project(":clickhouse-native-client-kotlin"))
     jmh("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
@@ -44,4 +47,7 @@ jmh {
     // ch.host is read inside the forked benchmark JVM (ClickHouseResource), which
     // doesn't inherit the Gradle invocation's -D flags — forward it explicitly.
     providers.systemProperty("ch.host").orNull?.let { jvmArgsAppend.add("-Dch.host=$it") }
+    // Optional class/method filter, e.g. -PjmhInclude=JdbcSelectBenchmark, so a single
+    // benchmark can be run without executing the whole suite.
+    providers.gradleProperty("jmhInclude").orNull?.let { includes.add(it) }
 }
