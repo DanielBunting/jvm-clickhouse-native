@@ -1616,29 +1616,12 @@ class JdbcPreparedStatementExtrasIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (jdbc-v2 {@code JDBCDateTimeTests#testTimestampInRange}):
-     * {@code setObject(ZonedDateTime)} binds the instant the value identifies, so the
-     * BETWEEN predicate matches rows 2 and 3, and
-     * {@code getObject(..., ZonedDateTime.class)} reads a DateTime column back as a
-     * ZonedDateTime. Actual: (a) {@code ChPreparedStatement.toLiteral} has no
-     * ZonedDateTime branch, so the value renders via {@code toString()} with an
-     * unparseable {@code [zone]} suffix and the query fails server-side; (b)
-     * {@code ChResultSet.coerceTo} has no ZonedDateTime coercion, so the read throws.
-     *
-     * <p>HOW TO FIX: (a) add ZonedDateTime/OffsetDateTime branches to
-     * {@code ChPreparedStatement.toLiteral} rendering the UTC wall clock (see the
-     * companion unit test
-     * {@code ChPreparedStatementBindingTest#knownBug_zonedAndOffsetDateTimeMustRenderUtcWallClockLiterals}
-     * for the exact snippet), plus the mirror in {@code QueryParameters.toText};
-     * (b) in {@code ChResultSet.coerceTo}
-     * ({@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChResultSet.java}),
-     * add {@code if (type == ZonedDateTime.class && v instanceof Instant i) return
-     * i.atZone(ZoneOffset.UTC);} (and the analogous OffsetDateTime coercion).
+     * ZonedDateTime binds as a UTC wall-clock literal and reads back through
+     * {@code getObject(col, ZonedDateTime.class)} (was knownBug 18): the read-side
+     * coercion derives the zoned view from the boxed Instant at UTC.
      */
     @Test
-    void knownBug_zonedDateTimeBindingAndTypedRead_clientSide() throws Exception {
+    void zonedDateTimeBindingAndTypedRead_clientSide() throws Exception {
         String table = "pstmt_zdt_cli";
         ZoneId utc = ZoneId.of("UTC");
         try (Connection conn = connect(false)) {

@@ -110,6 +110,13 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
     }
 
     override fun set(array: Array<Any?>, row: Int, value: Any?) {
+        if (value != null) {
+            // Validate inferability NOW, so an unsupported value fails at add() time —
+            // before any block bytes exist — with the row still identifiable, instead of
+            // surfacing at flush time. The inference itself is a short instanceof chain
+            // (no allocation); write() re-runs it to build the type set.
+            inferClickHouseType(value)
+        }
         array[row] = value
     }
 
@@ -137,6 +144,18 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
                 codecs[i] = parser.parse(`in`.readString())
             }
 
+            // Member types with their own serialization PREFIX (currently JSON: version +
+            // path list + per-path Dynamic type lists) emit that prefix HERE — after the
+            // member-type names, BEFORE the discriminators (verified against 25.8 wire
+            // bytes). Scalar/composite members contribute nothing.
+            val memberPrefixes = arrayOfNulls<Any>(numTypes)
+            for (i in 0 until numTypes) {
+                val codec = codecs[i]
+                if (codec is JsonColumnCodec) {
+                    memberPrefixes[i] = codec.readPrefix(`in`)
+                }
+            }
+
             val discriminators = IntArray(rowCount)
             val counts = IntArray(numTypes)
             for (row in 0 until rowCount) {
@@ -156,7 +175,13 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             for (i in 0 until numTypes) {
                 val codec = codecs[i] as ColumnCodec<Any>
                 val arr = codec.allocate(counts[i])
-                codec.read(`in`, counts[i], arr)
+                val prefix = memberPrefixes[i]
+                if (prefix != null) {
+                    (codec as JsonColumnCodec).readBody(
+                        `in`, counts[i], arr as Array<Any?>, prefix as JsonColumnCodec.JsonPrefix)
+                } else {
+                    codec.read(`in`, counts[i], arr)
+                }
                 subArrays[i] = arr
             }
 
@@ -268,9 +293,53 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             if (value is CharSequence) {
                 return "String"
             }
+            if (value is java.time.LocalDate) {
+                return "Date"
+            }
+            if (value is java.time.Instant) {
+                return "DateTime64(9)"
+            }
+            if (value is java.util.UUID) {
+                return "UUID"
+            }
+            if (value is java.math.BigInteger) {
+                // Pick the narrowest wide-int family that holds the value; the codecs
+                // range-check again at set() time.
+                return if (value.bitLength() < 127) "Int128" else "Int256"
+            }
+            if (value is List<*>) {
+                // Element type from the first NON-NULL element; a null element makes the
+                // array Nullable. An empty array infers Array(Nothing) — the server's own
+                // type for an untyped empty array literal.
+                var elemType: String? = null
+                var hasNull = false
+                for (e in value) {
+                    if (e == null) {
+                        hasNull = true
+                    } else if (elemType == null) {
+                        elemType = inferClickHouseType(e)
+                    }
+                }
+                return when {
+                    elemType == null && hasNull -> "Array(Nullable(Nothing))"
+                    elemType == null -> "Array(Nothing)"
+                    hasNull -> "Array(Nullable($elemType))"
+                    else -> "Array($elemType)"
+                }
+            }
+            if (value is Map<*, *>) {
+                val first = value.entries.firstOrNull()
+                    ?: return "Map(String, String)" // empty map: any concrete K/V works
+                val k = first.key ?: throw IllegalArgumentException(
+                    "Map keys must be non-null for Dynamic inference")
+                val v = first.value ?: throw IllegalArgumentException(
+                    "Map values must be non-null for Dynamic inference (wrap in a typed column instead)")
+                return "Map(" + inferClickHouseType(k) + ", " + inferClickHouseType(v) + ")"
+            }
             throw IllegalArgumentException(
                 "No Dynamic type inference for Java type " + value.javaClass.name
-                    + " (supported: Long, Integer, Short, Byte, Double, Float, Boolean, String)"
+                    + " (supported: Long, Integer, Short, Byte, Double, Float, Boolean, String,"
+                    + " LocalDate, Instant, UUID, BigInteger, List, Map)"
             )
         }
     }

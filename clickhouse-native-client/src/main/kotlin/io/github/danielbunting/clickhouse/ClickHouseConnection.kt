@@ -121,6 +121,20 @@ public interface ClickHouseConnection : AutoCloseable {
      *
      * @return `true` if the connection must be discarded rather than reused
      */
+    /**
+     * Lightweight liveness probe (reference: the official client's `ping()`): reports
+     * whether the server answers on this connection, without running a query. The
+     * default implementation falls back to `SELECT 1`; the real connection overrides it
+     * with the protocol-level `Ping`/`Pong` exchange. Never throws.
+     */
+    public fun ping(): Boolean {
+        return try {
+            executeScalar("SELECT 1") == 1L
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     public fun isPoisoned(): Boolean {
         return false
     }

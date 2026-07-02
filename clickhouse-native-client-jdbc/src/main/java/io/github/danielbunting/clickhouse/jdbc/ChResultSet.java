@@ -77,23 +77,34 @@ final class ChResultSet implements ResultSet {
         if (afterLast) {
             return false;
         }
-        while (true) {
-            if (currentBlock != null && rowInBlock + 1 < currentBlock.rowCount()) {
-                rowInBlock++;
-                return true;
+        try {
+            while (true) {
+                if (currentBlock != null && rowInBlock + 1 < currentBlock.rowCount()) {
+                    rowInBlock++;
+                    return true;
+                }
+                if (!blocks.hasNext()) {
+                    currentBlock = null;
+                    afterLast = true;
+                    return false;
+                }
+                Block next = blocks.next();
+                if (next == null || next.isEmpty()) {
+                    continue; // skip empty/terminator blocks
+                }
+                currentBlock = next;
+                rowInBlock = -1;
+                // loop continues; will advance into row 0 on the next iteration
             }
-            if (!blocks.hasNext()) {
-                currentBlock = null;
-                afterLast = true;
-                return false;
+        } catch (io.github.danielbunting.clickhouse.ClickHouseException e) {
+            // A server error can arrive MID-STREAM (e.g. max_result_rows overflow or a
+            // max_execution_time abort) from the lazy block pull; per the JDBC contract
+            // it must surface as an SQLException, not a raw unchecked ClickHouseException.
+            afterLast = true;
+            if (e instanceof io.github.danielbunting.clickhouse.ServerException se) {
+                throw new SQLException(se.getMessage(), null, se.code(), se);
             }
-            Block next = blocks.next();
-            if (next == null || next.isEmpty()) {
-                continue; // skip empty/terminator blocks
-            }
-            currentBlock = next;
-            rowInBlock = -1;
-            // loop continues; will advance into row 0 on the next iteration
+            throw new SQLException(e.getMessage(), e);
         }
     }
 
@@ -583,6 +594,25 @@ final class ChResultSet implements ResultSet {
         }
         if (type == Timestamp.class) {
             return JdbcValues.toTimestamp(v);
+        }
+        // Zoned/local views of a temporal column: derived from the boxed Instant at UTC
+        // (the driver's temporal contract is the absolute instant; the column timezone
+        // only affects how the SERVER interprets wall-clock literals). Callers wanting a
+        // different zone call withZoneSameInstant/atZone themselves.
+        if (type == java.time.Instant.class && v instanceof java.time.Instant) {
+            return v;
+        }
+        if (type == java.time.ZonedDateTime.class && v instanceof java.time.Instant instant) {
+            return instant.atZone(java.time.ZoneOffset.UTC);
+        }
+        if (type == java.time.OffsetDateTime.class && v instanceof java.time.Instant instant) {
+            return instant.atOffset(java.time.ZoneOffset.UTC);
+        }
+        if (type == java.time.LocalDateTime.class && v instanceof java.time.Instant instant) {
+            return java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC);
+        }
+        if (type == java.time.LocalDate.class && v instanceof java.time.LocalDate) {
+            return v;
         }
         return null;
     }

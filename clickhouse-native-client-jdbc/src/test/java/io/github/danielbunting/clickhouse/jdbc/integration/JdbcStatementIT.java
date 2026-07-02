@@ -427,29 +427,14 @@ class JdbcStatementIT {
     // ------------------------------------------------------------------
 
     /**
-     * KNOWN BUG (failing on purpose — ported from jdbc-v2
-     * {@code StatementTest#testExecuteQueryTimeout}): a query running longer than
-     * {@code setQueryTimeout(seconds)} must be aborted with an {@link SQLException}
-     * (JDBC contract; jdbc-v2 enforces it, and the core's
-     * {@code QueryCancelledException} javadoc explicitly promises "JDBC
-     * {@code Statement.setQueryTimeout}" fires the client-side watchdog).
-     *
-     * <p>Actual: {@code ChStatement.setQueryTimeout} only stores the value —
-     * {@code executeQuery}/{@code executeUpdate} never consult it (and the core's
-     * {@code ClickHouseConfig.queryTimeout} deadline is likewise unwired), so
-     * {@code SELECT sleep(2)} completes normally after ~2s.
-     *
-     * <p>HOW TO FIX: in {@code ChStatement.executeQuery}/{@code executeUpdate}
-     * (src/main/java/.../jdbc/ChStatement.java), when {@code queryTimeoutSeconds > 0}
-     * pass the per-query server setting {@code max_execution_time=<seconds>} via the
-     * core's {@code query(String, Map)} / {@code execute(String, Map)} overloads
-     * (simplest), or implement the promised client-side watchdog that schedules
-     * {@code conn.core().cancel()} after the deadline and surfaces
-     * {@code QueryCancelledException} as an {@code SQLTimeoutException}.
+     * A query running longer than {@code setQueryTimeout(seconds)} is aborted (was
+     * knownBug 6): the timeout now travels as the per-query server setting
+     * {@code max_execution_time}, so the SERVER aborts with TIMEOUT_EXCEEDED (159),
+     * surfaced as an {@link SQLException}. The connection stays healthy afterwards.
      */
     @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void knownBug_queryTimeoutAbortsLongRunningQuery() throws Exception {
+    void queryTimeoutAbortsLongRunningQuery() throws Exception {
         try (Connection conn = connect(); Statement st = conn.createStatement()) {
             st.setQueryTimeout(1);
             assertEquals(1, st.getQueryTimeout());
@@ -458,6 +443,14 @@ class JdbcStatementIT {
                     rs.next();
                 }
             }, "a query exceeding the 1s timeout must be aborted");
+
+            // Clean server-side abort: the same statement/connection stay usable, and
+            // clearing the timeout restores unbounded execution.
+            st.setQueryTimeout(0);
+            try (ResultSet rs = st.executeQuery("SELECT 1")) {
+                assertTrue(rs.next());
+                assertEquals(1, rs.getInt(1));
+            }
         }
     }
 
@@ -509,27 +502,12 @@ class JdbcStatementIT {
     }
 
     /**
-     * KNOWN BUG (failing on purpose — JDBC contract: {@link ResultSet#next()} declares
-     * {@code throws SQLException}, and every reference driver surfaces mid-stream server
-     * errors that way): when the server reports an error AFTER the result stream has
-     * started (here {@code max_result_rows} overflow in the default {@code throw} mode),
-     * draining the result set must raise an {@link SQLException}.
-     *
-     * <p>Actual: {@code ChResultSet.next()} iterates the core block iterator with no
-     * exception translation, so the raw unchecked core
-     * {@code io.github.danielbunting.clickhouse.ServerException} escapes through the
-     * JDBC API (callers catching {@code SQLException} miss it entirely).
-     *
-     * <p>HOW TO FIX: in {@code ChResultSet.next()}
-     * (src/main/java/.../jdbc/ChResultSet.java), wrap the {@code blocks.hasNext()} /
-     * {@code blocks.next()} calls in {@code try/catch (ClickHouseException e)} and
-     * rethrow {@code new SQLException(e.getMessage(), e)} (mirroring
-     * {@code ChStatement.wrap}); while there, propagate {@code ServerException.code()}
-     * as the vendor code (see
-     * {@code JdbcErrorHandlingIT#knownBug_serverErrorCodePropagatedToSqlExceptionGetErrorCode}).
+     * A server error arriving MID-STREAM (here: max_result_rows overflow while pulling
+     * blocks in {@code ResultSet.next()}) surfaces as an {@link SQLException} carrying
+     * the server error code as the vendor code (was knownBug 2: the raw unchecked
+     * {@code ServerException} used to escape).
      */
-    @Test
-    void knownBug_midStreamServerErrorSurfacesAsSqlException() throws Exception {
+    void midStreamServerErrorSurfacesAsSqlException() throws Exception {
         try (Connection conn = DriverManager.getConnection(url()
                 + "?settings.max_result_rows=1000");
                 Statement st = conn.createStatement()) {
@@ -795,10 +773,10 @@ class JdbcStatementIT {
             assertEquals(epoch1616633456, rs.getObject(4));
             assertEquals(rs.getObject(3), rs.getObject(4));
 
-            // Pinned: no OffsetDateTime coercion (v1 returns OffsetDateTime for
-            // tz-qualified DateTime columns).
-            assertThrows(SQLException.class,
-                    () -> rs.getObject(3, OffsetDateTime.class));
+            // OffsetDateTime coercion: the UTC view of the same instant (the column
+            // timezone never shifts the value; v1 shifted to the column zone instead).
+            assertEquals(epoch1616633456.atOffset(java.time.ZoneOffset.UTC),
+                    rs.getObject(3, OffsetDateTime.class));
             assertFalse(rs.next());
         }
     }

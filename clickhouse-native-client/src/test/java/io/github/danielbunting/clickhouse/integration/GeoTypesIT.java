@@ -31,10 +31,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ul>
  *
  * <p>Decoded geo values are therefore the plain nested {@code List}/{@code Double}
- * structures; typed geo objects are a later nicety. The {@code Point} case also exercises
- * the ENCODE direction (a record whose field is a {@code List<Double>} bound through the
- * Tuple codec); the deeper nested types are <b>decode-only</b> because building and binding
- * arbitrarily-nested geo literals via the mapper adds no codec coverage beyond Point + Array.
+ * structures; typed geo objects are a later nicety. Every alias is exercised in BOTH
+ * directions: decode from raw VALUES, and bulk-insert encode from nested Java Lists
+ * (reference: client-v2 DataTypeTests#testGeometryWriteToTable / writeGeometryTests and
+ * BinaryStreamUtilsTest#testWriteGeoRing — including the empty-ring edge).
  *
  * <p>Run with: {@code ./gradlew :clickhouse-native-client:integrationTest}
  */
@@ -211,6 +211,132 @@ class GeoTypesIT extends TypeRoundTripBase {
             List<?> poly1 = assertInstanceOf(List.class, mp.get(1), "polygon 1");
             List<?> ring1 = assertInstanceOf(List.class, poly1.get(0), "polygon 1 ring 0");
             assertPoint(ring1.get(0), 5.0, 5.0, "poly1 ring0 p0");
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // ENCODE round-trips for the nested aliases
+    // -------------------------------------------------------------------------
+
+    /** A record whose {@code r} field is a Ring/LineString as nested Lists. */
+    record RingRow(long id, List<List<Double>> r) {}
+
+    /**
+     * ENCODE: bulk-insert {@code Ring} rows of 0, 1, 2, and 3 points (reference:
+     * BinaryStreamUtilsTest#testWriteGeoRing exercises exactly this point-count matrix,
+     * with the empty ring as the offsets edge case) and read them back.
+     */
+    @Test
+    void ringBulkEncodeRoundTrips() {
+        withTable("geo_ring_enc", (conn, table) -> {
+            conn.execute("SET allow_experimental_geo_types = 1");
+            conn.execute("CREATE TABLE " + table + " (id UInt32, r Ring)"
+                    + " ENGINE = MergeTree() ORDER BY id");
+
+            List<RingRow> input = List.of(
+                    new RingRow(1, List.of()),
+                    new RingRow(2, List.of(List.of(1.0, 2.0))),
+                    new RingRow(3, List.of(List.of(1.0, 2.0), List.of(3.0, 4.0))),
+                    new RingRow(4, List.of(List.of(1.0, 2.0), List.of(3.0, 4.0), List.of(5.0, 6.0))));
+
+            try (BulkInserter<RingRow> inserter = conn.createBulkInserter(table, RingRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT r FROM " + table + " ORDER BY id");
+            assertEquals(4, rows.size());
+            for (int i = 0; i < 4; i++) {
+                List<?> ring = assertInstanceOf(List.class, rows.get(i)[0], "row " + (i + 1));
+                assertEquals(i, ring.size(), "row " + (i + 1) + " point count");
+            }
+            assertPoint(((List<?>) rows.get(3)[0]).get(2), 5.0, 6.0, "3-point ring p2");
+        });
+    }
+
+    /** ENCODE: a {@code LineString} bulk-inserts through the same Array(Point) path. */
+    @Test
+    void lineStringBulkEncodeRoundTrips() {
+        withTable("geo_line_enc", (conn, table) -> {
+            conn.execute("SET allow_experimental_geo_types = 1");
+            conn.execute("CREATE TABLE " + table + " (id UInt32, r LineString)"
+                    + " ENGINE = MergeTree() ORDER BY id");
+
+            List<RingRow> input = List.of(
+                    new RingRow(1, List.of(List.of(0.0, 0.0), List.of(1.0, 1.0), List.of(2.0, 0.0))));
+
+            try (BulkInserter<RingRow> inserter = conn.createBulkInserter(table, RingRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT r FROM " + table);
+            List<?> line = assertInstanceOf(List.class, rows.get(0)[0]);
+            assertEquals(3, line.size());
+            assertPoint(line.get(1), 1.0, 1.0, "line p1");
+        });
+    }
+
+    /** A record whose {@code poly} field is a Polygon as 3-deep nested Lists. */
+    record PolygonRow(long id, List<List<List<Double>>> poly) {}
+
+    /** ENCODE: a {@code Polygon} (outer ring + hole) bulk-inserts and reads back. */
+    @Test
+    void polygonBulkEncodeRoundTrips() {
+        withTable("geo_poly_enc", (conn, table) -> {
+            conn.execute("SET allow_experimental_geo_types = 1");
+            conn.execute("CREATE TABLE " + table + " (id UInt32, poly Polygon)"
+                    + " ENGINE = MergeTree() ORDER BY id");
+
+            List<List<Double>> outer = List.of(
+                    List.of(0.0, 0.0), List.of(0.0, 4.0), List.of(4.0, 4.0), List.of(4.0, 0.0));
+            List<List<Double>> hole = List.of(
+                    List.of(1.0, 1.0), List.of(1.0, 2.0), List.of(2.0, 2.0), List.of(2.0, 1.0));
+            List<PolygonRow> input = List.of(new PolygonRow(1, List.of(outer, hole)));
+
+            try (BulkInserter<PolygonRow> inserter =
+                         conn.createBulkInserter(table, PolygonRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT poly FROM " + table);
+            List<?> poly = assertInstanceOf(List.class, rows.get(0)[0]);
+            assertEquals(2, poly.size(), "outer + hole");
+            assertPoint(((List<?>) poly.get(0)).get(2), 4.0, 4.0, "outer p2");
+            assertPoint(((List<?>) poly.get(1)).get(0), 1.0, 1.0, "hole p0");
+        });
+    }
+
+    /** A record whose {@code mp} field is a MultiPolygon as 4-deep nested Lists. */
+    record MultiPolygonRow(long id, List<List<List<List<Double>>>> mp) {}
+
+    /** ENCODE: a {@code MultiPolygon} of two single-ring polygons bulk-inserts and reads back. */
+    @Test
+    void multiPolygonBulkEncodeRoundTrips() {
+        withTable("geo_mp_enc", (conn, table) -> {
+            conn.execute("SET allow_experimental_geo_types = 1");
+            conn.execute("CREATE TABLE " + table + " (id UInt32, mp MultiPolygon)"
+                    + " ENGINE = MergeTree() ORDER BY id");
+
+            List<MultiPolygonRow> input = List.of(new MultiPolygonRow(1, List.of(
+                    List.of(List.of(List.of(0.0, 0.0), List.of(0.0, 1.0), List.of(1.0, 1.0))),
+                    List.of(List.of(List.of(5.0, 5.0), List.of(5.0, 6.0), List.of(6.0, 6.0))))));
+
+            try (BulkInserter<MultiPolygonRow> inserter =
+                         conn.createBulkInserter(table, MultiPolygonRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT mp FROM " + table);
+            List<?> mp = assertInstanceOf(List.class, rows.get(0)[0]);
+            assertEquals(2, mp.size(), "two polygons");
+            assertPoint(((List<?>) ((List<?>) mp.get(1)).get(0)).get(0), 5.0, 5.0, "poly1 ring0 p0");
         });
     }
 

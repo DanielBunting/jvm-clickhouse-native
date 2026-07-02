@@ -344,24 +344,15 @@ class VariantDynamicCompositeIT extends TypeRoundTripBase {
     }
 
     /**
-     * KNOWN BUG — asserts the CORRECT behavior and currently FAILS.
-     *
-     * <p>A JSON value stored in a {@code Dynamic} column cannot be decoded: {@code read}
-     * throws {@link ProtocolException} ("Dynamic discriminator 3 out of range [0,1]"). The
-     * server side is fine — {@code toString(d)} renders {@code {"name":"r1","value":0.1}} and
-     * {@code dynamicType(d)} reports {@code JSON} — so
-     * {@link io.github.danielbunting.clickhouse.types.codec.DynamicColumnCodec} misparses the
-     * wire layout when the discovered member type is {@code JSON}: the JSON member's flattened
-     * framing (its own version/paths header) is not consumed where the server emits it, so the
-     * discriminator bytes are read from the wrong offset.
-     *
-     * <p>Fix approach: reverse-engineer the JSON-member framing inside flattened Dynamic (the
-     * standalone flattened JSON layout handled by {@code JsonColumnCodec} appears to carry a
-     * header that Dynamic emits in a different position) and consume it in
-     * {@code DynamicColumnCodec.read} before reading discriminators.
+     * A JSON value stored in a {@code Dynamic} column decodes to its JSON text (was
+     * knownBug 32: the JSON member's serialization PREFIX — version + path list + per-path
+     * Dynamic type lists — is emitted after the member-type names and BEFORE the Dynamic
+     * discriminators; {@code DynamicColumnCodec.readFlattened} now consumes member prefixes
+     * there and member bodies after the discriminators, layout verified against 25.8 wire
+     * bytes).
      */
     @Test
-    void knownBug_dynamicHoldingJsonMustDecode() {
+    void dynamicHoldingJsonDecodes() {
         withTable("dynamic_json", (conn, table) -> {
             enableExperimentalTypes(conn);
             conn.execute("CREATE TABLE " + table
@@ -381,14 +372,12 @@ class VariantDynamicCompositeIT extends TypeRoundTripBase {
     }
 
     /**
-     * KNOWN BUG — asserts the CORRECT behavior and currently FAILS.
-     *
-     * <p>Same decode failure as {@link #knownBug_dynamicHoldingJsonMustDecode}, hit with a JSON
-     * value containing an array path (the reference client's
-     * {@code testDynamicWithJSONWithArrays}). Same root cause and fix.
+     * Same wire shape as {@link #dynamicHoldingJsonDecodes}, with a JSON value containing an
+     * array path (the reference client's {@code testDynamicWithJSONWithArrays}); the array
+     * path renders back as a JSON array.
      */
     @Test
-    void knownBug_dynamicHoldingJsonWithArraysMustDecode() {
+    void dynamicHoldingJsonWithArraysDecodes() {
         withTable("dynamic_json_arr", (conn, table) -> {
             enableExperimentalTypes(conn);
             conn.execute("CREATE TABLE " + table

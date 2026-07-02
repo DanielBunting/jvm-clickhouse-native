@@ -117,4 +117,54 @@ class VariantTypesIT extends TypeRoundTripBase {
             assertNull(rows.get(2)[0], "row 3 should be NULL");
         });
     }
+
+    /**
+     * Temporal and rich-scalar members decode through their own codecs' natural Java
+     * types (reference: client-v2 BinaryReaderTests testReadingLocalDateFromVariant /
+     * testReadingInstantFromVariant / DataTypeTests#testVariantWithSimpleDataTypes):
+     * Date -> LocalDate, DateTime64 -> Instant, Float64 -> Double, UUID -> UUID,
+     * IPv6 -> Inet6Address — exactly what a dedicated column of that type yields.
+     */
+    @Test
+    void variantTemporalAndRichScalarMembersDecode() {
+        withTable("variant_rich", (conn, table) -> {
+            conn.execute("SET allow_experimental_variant_type = 1");
+            // Date + DateTime64 in one Variant is rejected as ambiguous by default.
+            conn.execute("SET allow_suspicious_variant_types = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, v Variant(Date, DateTime64(3), Float64, UUID, IPv6))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, v) VALUES"
+                    + " (1, '2021-03-04'::Date),"
+                    + " (2, '2021-03-04 15:06:27.123'::DateTime64(3)),"
+                    + " (3, 1.5::Float64),"
+                    + " (4, '123e4567-e89b-12d3-a456-426614174000'::UUID),"
+                    + " (5, '2001:db8::1'::IPv6)");
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT v, variantType(v) FROM " + table + " ORDER BY id");
+            assertEquals(5, rows.size());
+
+            assertEquals(java.time.LocalDate.of(2021, 3, 4), rows.get(0)[0]);
+            assertEquals("Date", rows.get(0)[1]);
+
+            assertEquals(java.time.Instant.parse("2021-03-04T15:06:27.123Z"), rows.get(1)[0]);
+            assertEquals("DateTime64(3)", rows.get(1)[1]);
+
+            assertEquals(1.5, rows.get(2)[0]);
+            assertEquals("Float64", rows.get(2)[1]);
+
+            assertEquals(java.util.UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
+                    rows.get(3)[0]);
+            assertEquals("UUID", rows.get(3)[1]);
+
+            assertInstanceOf(java.net.Inet6Address.class, rows.get(4)[0]);
+            try {
+                assertEquals(java.net.InetAddress.getByName("2001:db8::1"), rows.get(4)[0]);
+            } catch (java.net.UnknownHostException e) {
+                throw new AssertionError(e);
+            }
+            assertEquals("IPv6", rows.get(4)[1]);
+        });
+    }
 }

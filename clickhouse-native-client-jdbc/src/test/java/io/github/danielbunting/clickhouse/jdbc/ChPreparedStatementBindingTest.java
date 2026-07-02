@@ -314,29 +314,12 @@ class ChPreparedStatementBindingTest {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (jdbc-v2 supports {@code setObject(ZonedDateTime)} natively, see
-     * {@code JDBCDateTimeTests#testTimestampInRange}): a ZonedDateTime/OffsetDateTime
-     * identifies an instant, so it should render the same way an equivalent
-     * {@link java.time.Instant} does — the UTC wall clock, which the server parses
-     * into a DateTime/DateTime64. Actual: both types miss a {@code toLiteral} branch
-     * and fall through to {@code toString()}, yielding ISO forms with a zone suffix
-     * ({@code 2025-01-01T10:00Z[UTC]} / {@code 2025-01-01T10:00+02:00}) that
-     * ClickHouse cannot parse, so any bind of these types fails server-side.
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChPreparedStatement.java},
-     * add to {@code toLiteral(Object)} (next to the {@code Instant} branch):
-     * {@code if (value instanceof ZonedDateTime zdt) return quote(formatDateTime(
-     * LocalDateTime.ofInstant(zdt.toInstant(), ZoneOffset.UTC)));} and the analogous
-     * branch for {@code OffsetDateTime}. Mirror the same two branches in
-     * {@code QueryParameters.toText} (clickhouse-native-client
-     * {@code src/main/kotlin/io/github/danielbunting/clickhouse/QueryParameters.kt})
-     * so the server-side path renders identically.
+     * Zone-carrying temporals render as their UTC wall clock (was knownBug 17):
+     * {@code toLiteral} shifts the value to UTC and drops the zone, matching the
+     * {@code Instant} branch — so the server parses a plain DateTime literal.
      */
     @Test
-    void knownBug_zonedAndOffsetDateTimeMustRenderUtcWallClockLiterals() {
+    void zonedAndOffsetDateTimeRenderUtcWallClockLiterals() {
         ZonedDateTime zdt = ZonedDateTime.of(2025, 1, 1, 10, 0, 0, 0, ZoneId.of("UTC"));
         assertEquals("'2025-01-01 10:00:00'", ChPreparedStatement.toLiteral(zdt));
         // 10:00 at +02:00 is 08:00 UTC.

@@ -286,10 +286,9 @@ class JdbcDataTypeExtrasIT {
     /**
      * A Map whose values are arrays surfaces through {@code getObject} as a
      * {@code Map<String, List<Integer>>} and through {@code getString} as a ClickHouse
-     * literal. jdbc-v2 also binds a Java {@code Map} via {@code setObject}; this
-     * driver's parameter renderer has no Map form, so the write side here uses a SQL
-     * literal (the Map-binding gap is asserted as a bug by
-     * {@link #knownBug_setObjectMapMustBindMapColumns()}).
+     * literal. jdbc-v2 also binds a Java {@code Map} via {@code setObject}; that
+     * binding path is covered by {@link #setObjectMapBindsMapColumns()} — the write
+     * side here uses a SQL literal to keep this test focused on the read shapes.
      */
     @Test
     void mapWithArrayValues() throws Exception {
@@ -313,26 +312,15 @@ class JdbcDataTypeExtrasIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (jdbc-v2 {@code JdbcDataTypeTests#testMapTypesWithArrayValues}):
-     * {@code setObject(1, Map.of("a", List.of(1, 2)))} into a
-     * {@code Map(String, Array(Int32))} column binds as a ClickHouse map literal
-     * {@code {'a':[1,2]}} and the row inserts and reads back as the same Map. Actual
-     * (client-side binding mode): {@code ChPreparedStatement.toLiteral} has no Map
-     * branch, so the value falls through to the string fallback and renders as
-     * {@code '{a=[1, 2]}'} (Java's {@code Map.toString()}), which the server rejects
-     * when parsing the VALUES tuple for the Map column.
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChPreparedStatement.java},
-     * method {@code toLiteral}, add a {@code java.util.Map} branch (before the generic
-     * Collection/array branch) that renders {@code {'k':v, ...}} — recursing through
-     * {@code toLiteral} for each key and value, mirroring the existing
-     * {@code arrayLiteral} helper for Collections.
+     * {@code setObject(Map)} binds a ClickHouse map literal (jdbc-v2
+     * {@code JdbcDataTypeTests#testMapTypesWithArrayValues}): the {@code toLiteral}
+     * Map branch renders {@code {'k': v, ...}} recursively, so a
+     * {@code Map(String, Array(Int32))} column is writable through parameters.
+     * (Was knownBug 20 — fixed by adding the Map branch to
+     * {@code ChPreparedStatement.toLiteral}.)
      */
     @Test
-    void knownBug_setObjectMapMustBindMapColumns() throws Exception {
+    void setObjectMapBindsMapColumns() throws Exception {
         String table = "jdbc_dt_map_bind";
         try (Connection conn = connect()) {
             try (Statement st = conn.createStatement()) {

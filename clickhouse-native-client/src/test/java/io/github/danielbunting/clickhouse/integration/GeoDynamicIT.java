@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -138,53 +139,36 @@ class GeoDynamicIT extends TypeRoundTripBase {
     record DynRow(long id, Object d) {}
 
     /**
-     * ENCODE boundary: writing a geo value (a {@code List}-boxed Point) INTO a Dynamic
-     * column is unsupported — {@code DynamicColumnCodec.inferClickHouseType} has no
-     * mapping for {@code java.util.List}, so the write path rejects it with an
-     * {@link IllegalArgumentException} naming the unsupported Java type. Mirrors the
-     * reference row's concern (geo type tags in Dynamic encoding) at this client's
-     * actual capability boundary.
-     *
-     * <p>PINNED side effect: the rejection is raised while the block is already being
-     * streamed (header and sibling columns are on the socket), so the connection is left
-     * mid-protocol and POISONED — subsequent use fails server-side ("Unknown codec family
-     * code"). This test therefore manages its table on a second connection and pins
-     * {@code isPoisoned()} rather than reusing the broken connection.
+     * ENCODE: a {@code List}-boxed geo value written INTO a Dynamic column is inferred as
+     * a plain nested array ({@code Array(Float64)}), NOT as a geo type — the inference has
+     * no way to distinguish a Point from any other 2-element double list. Mirrors the
+     * reference row's concern (geo type tags in Dynamic encoding) at this client's actual
+     * behavior: the value round-trips structurally, under the array type tag.
      */
     @Test
-    void dynamicGeoEncodeIsRejected() {
-        String table = "dyn_geo_enc_" + System.nanoTime();
-        ClickHouseConnection conn = ClickHouseConnection.open(config());
-        try {
+    void dynamicGeoEncodeLandsAsPlainArray() {
+        withTable("dyn_geo_enc", (conn, table) -> {
             conn.execute("SET allow_experimental_dynamic_type = 1");
             conn.execute("CREATE TABLE " + table
                     + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
 
             List<DynRow> input = List.of(new DynRow(1, Arrays.asList(1.5, 2.5)));
-
-            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> {
-                try (BulkInserter<DynRow> inserter =
-                             conn.createBulkInserter(table, DynRow.class)) {
-                    inserter.init();
-                    inserter.addRange(input);
-                    inserter.complete();
-                }
-            }, "encoding a List-boxed geo value into Dynamic must be rejected");
-            assertTrue(ex.getMessage() != null
-                            && ex.getMessage().contains("No Dynamic type inference"),
-                    "expected the inference rejection, got: " + ex);
-
-            assertTrue(conn.isPoisoned(),
-                    "the mid-block rejection leaves the connection poisoned");
-        } finally {
-            try {
-                conn.close();
-            } catch (RuntimeException ignored) {
-                // Closing the poisoned connection may itself fail; the socket is gone either way.
+            try (BulkInserter<DynRow> inserter =
+                         conn.createBulkInserter(table, DynRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
             }
-            try (ClickHouseConnection cleanup = ClickHouseConnection.open(config())) {
-                cleanup.execute("DROP TABLE IF EXISTS " + table);
-            }
-        }
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT d, dynamicType(d) FROM " + table);
+            assertEquals(1, rows.size());
+            assertEquals(List.of(1.5, 2.5), rows.get(0)[0],
+                    "the value round-trips structurally");
+            assertEquals("Array(Float64)", rows.get(0)[1],
+                    "inference produces a plain array type tag, not Point");
+            assertFalse(conn.isPoisoned(), "clean encode, healthy connection");
+        });
     }
+
 }

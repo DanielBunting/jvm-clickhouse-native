@@ -73,18 +73,34 @@ import java.io.IOException
  */
 public class JsonColumnCodec
 /**
- * @param parser used to resolve path member type names discovered on the wire
+ * @param parser      used to resolve path member type names discovered on the wire
+ * @param declaration the full column type string (e.g. `JSON(max_dynamic_paths=8, a.b Int64)`),
+ *                    or `null`/plain `JSON` for a column with no typed paths. TYPED paths are
+ *                    serialized on the wire as their DECLARED type (no Dynamic framing), so the
+ *                    codec must know them up front — they are not discoverable from the wire.
  */
-public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
+public constructor(parser: TypeParser?, declaration: String?) : ColumnCodec<Array<Any?>> {
 
     private val parser: TypeParser
+
+    /** Typed-path names, in the canonical (sorted) order the server serializes them. */
+    private val typedPathNames: Array<String>
+
+    /** Codec per typed path, positionally aligned with [typedPathNames]. */
+    private val typedPathCodecs: Array<ColumnCodec<*>>
 
     init {
         if (parser == null) {
             throw NullPointerException("parser")
         }
         this.parser = parser
+        val typed = parseTypedPaths(declaration)
+        this.typedPathNames = Array(typed.size) { typed[it].first }
+        this.typedPathCodecs = Array(typed.size) { parser.parse(typed[it].second) }
     }
+
+    /** Codec for a plain `JSON` column (no typed paths). */
+    public constructor(parser: TypeParser?) : this(parser, null)
 
     override fun typeName(): String {
         return "JSON"
@@ -94,12 +110,24 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
         return arrayOfNulls(rowCount)
     }
 
+    /**
+     * Opaque wire-prefix state: the dynamic-path names and each dynamic path's Dynamic
+     * type list, read by [readPrefix] and consumed by [readBody]. Split out because a
+     * `JSON` value inside a `Dynamic` column serializes its prefix BEFORE the Dynamic
+     * discriminators and its body after them (see [DynamicColumnCodec.readFlattened]).
+     */
+    internal class JsonPrefix(
+        @JvmField val dynamicPaths: Array<String?>,
+        @JvmField val dynamicPathCodecs: Array<Array<ColumnCodec<*>?>?>,
+    )
+
+    /**
+     * Reads the JSON column's serialization PREFIX: version, dynamic-path names, and each
+     * dynamic path's Dynamic type list. TYPED paths (declared in the column type) are NOT
+     * on this list — they serialize as their declared type with no Dynamic framing.
+     */
     @Throws(IOException::class)
-    @Suppress("UNCHECKED_CAST")
-    override fun read(`in`: BinaryReader, rowCount: Int, dest: Array<Any?>) {
-        if (rowCount == 0) {
-            return
-        }
+    internal fun readPrefix(`in`: BinaryReader): JsonPrefix {
         val version = `in`.readUInt64()
         if (version != JSON_VERSION) {
             throw ProtocolException(
@@ -115,7 +143,7 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             paths[p] = `in`.readString()
         }
 
-        // --- PREFIXES: per-path Dynamic type lists (all paths first) ---
+        // Per-dynamic-path Dynamic type lists (all paths first).
         val pathCodecs = arrayOfNulls<Array<ColumnCodec<*>?>>(numPaths)
         for (p in 0 until numPaths) {
             val dynVersion = `in`.readUInt64()
@@ -130,6 +158,42 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
                 codecs[i] = parser.parse(`in`.readString())
             }
             pathCodecs[p] = codecs
+        }
+        return JsonPrefix(paths, pathCodecs)
+    }
+
+    @Throws(IOException::class)
+    @Suppress("UNCHECKED_CAST")
+    override fun read(`in`: BinaryReader, rowCount: Int, dest: Array<Any?>) {
+        if (rowCount == 0) {
+            return
+        }
+        readBody(`in`, rowCount, dest, readPrefix(`in`))
+    }
+
+    /**
+     * Reads the JSON column's BODY: first the typed-path sub-columns (each read directly
+     * through its declared codec, in canonical order), then each dynamic path's
+     * discriminators + sub-columns, then reconstructs one JSON object String per row.
+     */
+    @Throws(IOException::class)
+    @Suppress("UNCHECKED_CAST")
+    internal fun readBody(`in`: BinaryReader, rowCount: Int, dest: Array<Any?>, prefix: JsonPrefix) {
+        val paths = prefix.dynamicPaths
+        val pathCodecs = prefix.dynamicPathCodecs
+        val numPaths = paths.size
+
+        // --- TYPED-PATH BODIES: plain sub-columns of the declared types, sorted order ---
+        val typedValues = arrayOfNulls<Array<Any?>>(typedPathNames.size)
+        for (t in typedPathNames.indices) {
+            val codec = typedPathCodecs[t] as ColumnCodec<Any>
+            val arr = codec.allocate(rowCount)
+            codec.read(`in`, rowCount, arr)
+            val boxed = arrayOfNulls<Any>(rowCount)
+            for (row in 0 until rowCount) {
+                boxed[row] = codec.get(arr, row)
+            }
+            typedValues[t] = boxed
         }
 
         // --- BODIES: per-path discriminators + sub-columns (all paths) ---
@@ -175,9 +239,27 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             }
         }
 
-        // Reconstruct one JSON object String per row.
+        // Reconstruct one JSON object String per row, merging typed + dynamic paths in
+        // sorted-name order (matching the sorted key order of the dynamic-only case).
+        val allNames = arrayOfNulls<String>(typedPathNames.size + numPaths)
+        val allValues = arrayOfNulls<Array<Any?>>(allNames.size)
+        for (t in typedPathNames.indices) {
+            allNames[t] = typedPathNames[t]
+            allValues[t] = typedValues[t]
+        }
+        for (p in 0 until numPaths) {
+            allNames[typedPathNames.size + p] = paths[p]
+            allValues[typedPathNames.size + p] = pathValues[p]
+        }
+        val order = (0 until allNames.size).sortedBy { allNames[it] }
+        val sortedNames = arrayOfNulls<String>(allNames.size)
+        val sortedValues = arrayOfNulls<Array<Any?>>(allNames.size)
+        for (i in order.indices) {
+            sortedNames[i] = allNames[order[i]]
+            sortedValues[i] = allValues[order[i]]
+        }
         for (row in 0 until rowCount) {
-            dest[row] = buildJson(paths, pathValues, row)
+            dest[row] = buildJson(sortedNames, sortedValues, row)
         }
     }
 
@@ -185,6 +267,14 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
     override fun write(out: BinaryWriter, src: Array<Any?>, rowCount: Int) {
         if (rowCount == 0) {
             return // empty/terminating block: no payload (mirrors read())
+        }
+        if (typedPathNames.isNotEmpty()) {
+            // A typed path must be serialized as its declared type at its canonical wire
+            // position; this writer emits every path as Dynamic, which the server would
+            // misread. Reject up front (at the staged encode, so the connection is safe).
+            throw IllegalArgumentException(
+                "Writing into a JSON column with typed paths is not supported (typed: "
+                    + typedPathNames.joinToString(", ") + ")")
         }
 
         // Parse each row's JSON object into a flat path->scalar map.
@@ -466,6 +556,71 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
         private const val JSON_VERSION: Long = 3L
         private const val DYNAMIC_VERSION: Long = 3L
 
+        /**
+         * Parses the TYPED-PATH declarations out of a `JSON(...)` type string:
+         * `max_dynamic_*=N` parameters and `SKIP`/`SKIP REGEXP` entries are ignored;
+         * every remaining `path Type` entry (path optionally backtick-quoted) is a typed
+         * path. Returns (name, type) pairs sorted by name — the canonical order the
+         * server serializes typed-path sub-columns in.
+         */
+        @JvmStatic
+        internal fun parseTypedPaths(declaration: String?): List<Pair<String, String>> {
+            if (declaration == null) {
+                return emptyList()
+            }
+            val open = declaration.indexOf('(')
+            if (open < 0 || !declaration.endsWith(")")) {
+                return emptyList()
+            }
+            val inner = declaration.substring(open + 1, declaration.length - 1)
+            val out = ArrayList<Pair<String, String>>()
+            var depth = 0
+            var inBacktick = false
+            var start = 0
+            var i = 0
+            while (i <= inner.length) {
+                val atEnd = i == inner.length
+                val c = if (atEnd) ',' else inner[i]
+                if (!atEnd && c == '`') {
+                    inBacktick = !inBacktick
+                } else if (!inBacktick) {
+                    when {
+                        c == '(' -> depth++
+                        c == ')' -> depth--
+                        c == ',' && depth == 0 -> {
+                            val entry = inner.substring(start, i).trim()
+                            start = i + 1
+                            if (entry.isNotEmpty() && !entry.contains('=')
+                                && !entry.startsWith("SKIP")
+                            ) {
+                                val name: String
+                                val type: String
+                                if (entry.startsWith("`")) {
+                                    val close = entry.indexOf('`', 1)
+                                    name = entry.substring(1, close)
+                                    type = entry.substring(close + 1).trim()
+                                } else {
+                                    val sp = entry.indexOf(' ')
+                                    if (sp < 0) {
+                                        i++
+                                        continue
+                                    }
+                                    name = entry.substring(0, sp)
+                                    type = entry.substring(sp + 1).trim()
+                                }
+                                if (type.isNotEmpty()) {
+                                    out.add(Pair(name, type))
+                                }
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+            out.sortBy { it.first }
+            return out
+        }
+
         /** Builds a `{"path":value,...}` String for [row], omitting NULL paths. */
         @JvmStatic
         private fun buildJson(paths: Array<String?>, pathValues: Array<Array<Any?>?>, row: Int): String {
@@ -491,6 +646,15 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
         private fun appendValue(sb: StringBuilder, v: Any) {
             if (v is Number || v is Boolean) {
                 sb.append(v)
+            } else if (v is List<*>) {
+                // An array-valued path (e.g. Array(Nullable(Int64)) under Dynamic) renders
+                // as a JSON array, recursing per element.
+                sb.append('[')
+                for ((i, e) in v.withIndex()) {
+                    if (i > 0) sb.append(',')
+                    if (e == null) sb.append("null") else appendValue(sb, e)
+                }
+                sb.append(']')
             } else {
                 appendQuoted(sb, v.toString())
             }

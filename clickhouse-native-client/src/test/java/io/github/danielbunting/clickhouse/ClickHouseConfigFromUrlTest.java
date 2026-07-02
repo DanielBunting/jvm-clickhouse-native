@@ -483,8 +483,8 @@ final class ClickHouseConfigFromUrlTest {
                     ClickHouseConfig.fromUrl("chnative://host?sslmode=" + mode);
             assertFalse(cfg.tls(), "sslmode=" + mode);
         }
-        // TLS on, verification intact
-        for (String mode : new String[] {"strict", "verify-full", "require", "true", "STRICT"}) {
+        // TLS on, verification intact (incl. mixed case — the parser lowercases first)
+        for (String mode : new String[] {"strict", "verify-full", "require", "true", "STRICT", "sTrIcT"}) {
             ClickHouseConfig cfg =
                     ClickHouseConfig.fromUrl("chnative://host?sslmode=" + mode);
             assertTrue(cfg.tls(), "sslmode=" + mode);
@@ -497,5 +497,62 @@ final class ClickHouseConfigFromUrlTest {
             assertTrue(cfg.tls(), "sslmode=" + mode);
             assertTrue(cfg.insecureSkipVerify(), "sslmode=" + mode);
         }
+    }
+
+    /**
+     * A query-parameter VALUE containing "/" survives parsing intact (reference:
+     * ClickHouseNodeTest/ClickHouseNodesTest#testQueryWithSlash — a slash in a param
+     * value must not be mistaken for a path separator), on both single- and
+     * multi-endpoint URLs.
+     */
+    @Test
+    void paramValueContainingSlash_parsedIntact() {
+        ClickHouseConfig single = ClickHouseConfig.fromUrl(
+                "chnative://h1:9000/db?settings.log_comment=a/b/c");
+        assertEquals("a/b/c", single.settings().get("log_comment"),
+                "slash inside a query-parameter value is data, not a path");
+
+        ClickHouseConfig multi = ClickHouseConfig.fromUrl(
+                "chnative://h1:9000,h2:9001/db?settings.log_comment=x/y");
+        assertEquals("x/y", multi.settings().get("log_comment"),
+                "the same holds across a comma-separated endpoint list");
+        assertEquals(2, multi.endpoints().size(), "both endpoints still parsed");
+    }
+
+    /**
+     * Builder defaults (reference: client-v2 ClientTests#testDefaultSettings — every
+     * documented config default is pinned). A bare builder must produce the documented
+     * ClickHouse-sensible defaults.
+     */
+    @Test
+    void builderDefaults_arePinned() {
+        ClickHouseConfig cfg = ClickHouseConfig.builder().build();
+
+        assertEquals(java.util.List.of(new Endpoint("localhost", 9000)), cfg.endpoints());
+        assertEquals("default", cfg.database());
+        assertEquals("default", cfg.username());
+        assertEquals("", cfg.password());
+        assertEquals(CompressionMethod.LZ4, cfg.compression());
+        assertEquals(Duration.ofSeconds(10), cfg.connectTimeout());
+        assertEquals(Duration.ofSeconds(30), cfg.socketTimeout());
+        assertEquals(Duration.ZERO, cfg.queryTimeout());
+        assertFalse(cfg.tls(), "TLS is opt-in");
+        assertTrue(cfg.verifyHostname(), "hostname verification on by default");
+        assertFalse(cfg.insecureSkipVerify(), "trust-all is opt-in");
+        assertEquals(65_536, cfg.insertBatchSize());
+        assertTrue(cfg.settings().isEmpty(), "no default server settings");
+        assertEquals(LoadBalancingPolicy.FIRST_ALIVE, cfg.loadBalancingPolicy());
+    }
+
+    /**
+     * A blank/null host with no endpoint list fails the build with a clear message
+     * (reference: client-v2 ClientTests#testInvalidConfig — missing endpoint rejected).
+     */
+    @Test
+    void builderWithNullHostAndNoEndpoints_throws() {
+        Exception e = assertThrows(Exception.class,
+                () -> ClickHouseConfig.builder().host(null).build());
+        assertTrue(e.getMessage().contains("host must not be null or blank"),
+                "message names the missing endpoint host: " + e.getMessage());
     }
 }

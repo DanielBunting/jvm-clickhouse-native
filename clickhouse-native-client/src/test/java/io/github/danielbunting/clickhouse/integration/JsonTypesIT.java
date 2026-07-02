@@ -90,4 +90,61 @@ class JsonTypesIT extends TypeRoundTripBase {
             assertTrue(!s1.contains("\"b\""), "row 2 must omit the absent b path, was " + s1);
         });
     }
+
+    /**
+     * Typed sub-paths of a parameterized {@code JSON(...)} column decode correctly when
+     * SELECTed as sub-path columns (reference: client-v2 DataTypeTests
+     * #testJSONBinaryFormat — typed path + {@code max_dynamic_paths}). The whole-column
+     * read of the same table is the KNOWN BUG below.
+     */
+    @Test
+    void parameterizedJsonTypedSubPathDecodes() {
+        withTable("json_typed_sub", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(max_dynamic_paths = 8, a.b Int64))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"a\": {\"b\": 42}, \"c\": \"x\"}'),"
+                    + " (2, '{\"a\": {\"b\": 7}}')");
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT j.a.b, j.c FROM " + table + " ORDER BY id");
+            assertEquals(2, rows.size());
+            assertEquals(42L, ((Number) rows.get(0)[0]).longValue(),
+                    "typed sub-path reads through its declared Int64");
+            assertEquals("x", rows.get(0)[1], "dynamic sub-path reads through Dynamic");
+            assertEquals(7L, ((Number) rows.get(1)[0]).longValue());
+            org.junit.jupiter.api.Assertions.assertNull(rows.get(1)[1],
+                    "absent dynamic path is NULL");
+        });
+    }
+
+    /**
+     * A WHOLE-COLUMN read of a {@code JSON} column declared with a TYPED PATH (was
+     * knownBug 33): typed paths are serialized as their DECLARED type at a fixed wire
+     * position (after the dynamic-path prefixes, before the dynamic-path bodies — layout
+     * verified against 25.8 wire bytes), so {@code JsonColumnCodec} parses the typed-path
+     * declarations from the column type string and decodes each through its own codec.
+     * The reconstructed object carries the typed path under its dotted key.
+     */
+    @Test
+    void wholeColumnReadOfTypedPathJsonDecodes() {
+        withTable("json_typed_whole", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(a.b Int64)) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"a\": {\"b\": 42}, \"c\": \"x\"}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table);
+            assertEquals(1, rows.size());
+            String j = (String) rows.get(0)[0];
+            assertTrue(j.contains("\"a.b\":42"),
+                    "typed path present under its dotted key, was " + j);
+            assertTrue(j.contains("\"c\":\"x\""),
+                    "dynamic path present alongside the typed one, was " + j);
+        });
+    }
+
 }

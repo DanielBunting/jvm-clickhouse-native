@@ -166,4 +166,194 @@ class QuerySemanticsIT extends TypeRoundTripBase {
             }
         });
     }
+
+    /**
+     * A per-query {@code log_comment} lands in {@code system.query_log} (reference:
+     * client-v2 ClientTests#testLogComment).
+     */
+    @Test
+    void logCommentIsRecordedInQueryLog() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            String comment = "qsem_log_comment_" + System.nanoTime();
+            try (QueryResult r = conn.query("SELECT 1", Map.of("log_comment", comment))) {
+                materialize(r);
+            }
+            conn.execute("SYSTEM FLUSH LOGS");
+            long hits = conn.executeScalar(
+                    "SELECT count() FROM system.query_log WHERE log_comment = '" + comment + "'");
+            assertTrue(hits >= 1, "the log_comment setting must be recorded in system.query_log");
+        }
+    }
+
+    /**
+     * Server error codes and full (multi-line) messages surface for a spread of error
+     * families (reference: client-v2 ClientTests#testServerErrorsUncompressed): unknown
+     * table (60), unknown identifier (47), syntax error (62).
+     */
+    @Test
+    void serverErrorCodesAndMessagesSurfaceAcrossErrorFamilies() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            record Case(String sql, int code) {}
+            List<Case> cases = List.of(
+                    new Case("SELECT * FROM qsem_no_such_table_" + System.nanoTime(), 60),
+                    new Case("SELECT no_such_column FROM system.one", 47),
+                    new Case("SELECT * FRM system.one", 62));
+            for (Case c : cases) {
+                ServerException e = assertThrows(ServerException.class, () -> {
+                    try (QueryResult r = conn.query(c.sql())) {
+                        materialize(r);
+                    }
+                }, c.sql());
+                assertEquals(c.code(), e.code(), "error code for: " + c.sql());
+                assertTrue(e.getMessage() != null && e.getMessage().contains("DB::Exception"),
+                        "full server message text is preserved: " + e.getMessage());
+                // The connection survives each clean server error.
+                assertEquals(1L, conn.executeScalar("SELECT 1"));
+            }
+        }
+    }
+
+    /**
+     * A server error arriving over a COMPRESSED response stream still parses cleanly
+     * (reference: client-v2 ClientTests#testServerErrorHandling with compression): the
+     * exception packet is itself framed like any other packet, per compression method.
+     */
+    @Test
+    void serverErrorSurvivesResponseCompression() {
+        for (io.github.danielbunting.clickhouse.compress.CompressionMethod method :
+                new io.github.danielbunting.clickhouse.compress.CompressionMethod[] {
+                        io.github.danielbunting.clickhouse.compress.CompressionMethod.LZ4,
+                        io.github.danielbunting.clickhouse.compress.CompressionMethod.ZSTD}) {
+            io.github.danielbunting.clickhouse.ClickHouseConfig cfg =
+                    io.github.danielbunting.clickhouse.ClickHouseConfig.builder()
+                            .host(clickHouseHost())
+                            .port(clickHousePort())
+                            .compression(method)
+                            .build();
+            try (ClickHouseConnection conn = ClickHouseConnection.open(cfg)) {
+                ServerException e = assertThrows(ServerException.class, () -> {
+                    try (QueryResult r = conn.query("SELECT no_such_column FROM system.one")) {
+                        materialize(r);
+                    }
+                }, method.toString());
+                assertEquals(47, e.code(), "code parsed under " + method);
+                assertEquals(1L, conn.executeScalar("SELECT 1"),
+                        "connection reusable after compressed error (" + method + ")");
+            }
+        }
+    }
+
+    /**
+     * A zero-row result still exposes full column metadata (reference: client-v2
+     * QueryTests#testQueryRecordsOnEmptyDataset / #testQueryRecordsWithEmptyResult): the
+     * server's header block carries names and types even when no data blocks follow.
+     */
+    @Test
+    void emptyResultStillExposesColumnNamesAndTypes() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config());
+             QueryResult result = conn.query(
+                     "SELECT number AS n, toString(number) AS s FROM system.numbers WHERE 1 = 0")) {
+            assertEquals(List.of("n", "s"), result.columnNames(),
+                    "column names present on an empty result");
+            assertEquals(List.of("UInt64", "String"), result.columnTypes(),
+                    "column types present on an empty result");
+            assertEquals(0, materialize(result).size(), "no rows");
+        }
+    }
+
+    /**
+     * The caller's settings map is not mutated by query execution (reference: client-v2
+     * QueryTests#testSettingsNotChanged).
+     */
+    @Test
+    void querySettingsMapIsNotMutatedByExecution() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            java.util.Map<String, String> settings = new java.util.HashMap<>();
+            settings.put("max_result_rows", "100");
+            settings.put("log_comment", "qsem_immutable");
+            java.util.Map<String, String> snapshot = new java.util.HashMap<>(settings);
+
+            try (QueryResult r = conn.query("SELECT 1", settings)) {
+                materialize(r);
+            }
+            assertEquals(snapshot, settings, "query() must not mutate the caller's settings map");
+        }
+    }
+
+    /**
+     * {@code QueryResult.summary()} aggregates the server's Progress/ProfileInfo
+     * feedback (reference: client-v2 OperationMetrics / QueryTests#testGettingRowsBeforeLimit):
+     * read-rows on a full scan, and {@code rows_before_limit} + {@code appliedLimit}
+     * under a LIMIT.
+     */
+    @Test
+    void querySummaryReportsReadRowsAndRowsBeforeLimit() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            try (QueryResult r = conn.query("SELECT number FROM numbers(1000000)")) {
+                materialize(r);
+                io.github.danielbunting.clickhouse.QuerySummary s = r.summary();
+                assertEquals(1_000_000L, s.readRows(),
+                        "the server reported reading exactly the scanned rows");
+                assertTrue(s.readBytes() > 0, "read bytes reported");
+            }
+
+            try (QueryResult r = conn.query(
+                    "SELECT number FROM numbers(1000) ORDER BY number LIMIT 10")) {
+                assertEquals(10, materialize(r).size());
+                io.github.danielbunting.clickhouse.QuerySummary s = r.summary();
+                assertTrue(s.appliedLimit(), "LIMIT was applied");
+                assertEquals(1000L, s.rowsBeforeLimit(),
+                        "rows_before_limit reports the pre-LIMIT cardinality");
+            }
+        }
+    }
+
+    /**
+     * The configured {@link io.github.danielbunting.clickhouse.ClickHouseConfig#queryTimeout()}
+     * is enforced SERVER-side as {@code max_execution_time} (was inert): a query running
+     * past it aborts with TIMEOUT_EXCEEDED (159), and an explicit per-query
+     * {@code max_execution_time} still wins over the config default.
+     */
+    @Test
+    void configQueryTimeoutIsEnforcedServerSide() {
+        io.github.danielbunting.clickhouse.ClickHouseConfig cfg =
+                io.github.danielbunting.clickhouse.ClickHouseConfig.builder()
+                        .host(clickHouseHost())
+                        .port(clickHousePort())
+                        .queryTimeout(Duration.ofSeconds(1))
+                        .build();
+        try (ClickHouseConnection conn = ClickHouseConnection.open(cfg)) {
+            ServerException e = assertThrows(ServerException.class, () -> {
+                try (QueryResult r = conn.query("SELECT sleep(2)")) {
+                    materialize(r);
+                }
+            });
+            assertEquals(159, e.code(), "TIMEOUT_EXCEEDED, got: " + e.getMessage());
+            assertEquals(1L, conn.executeScalar("SELECT 1"),
+                    "clean server-side abort; connection reusable");
+
+            // A per-query override beats the config default.
+            try (QueryResult r = conn.query("SELECT sleep(2)",
+                    Map.of("max_execution_time", "10"))) {
+                assertEquals(1, materialize(r).size(),
+                        "explicit per-query max_execution_time wins over the config timeout");
+            }
+        }
+    }
+
+    /**
+     * {@code ping()} (reference: ClickHouseClientTest#testPing): the protocol-level
+     * Ping/Pong probe answers true on a live connection, false after close, and never
+     * throws.
+     */
+    @Test
+    void pingProbesLivenessWithoutThrowing() {
+        ClickHouseConnection conn = ClickHouseConnection.open(config());
+        assertTrue(conn.ping(), "live connection answers the Ping probe");
+        assertTrue(conn.ping(), "ping is repeatable (the Pong is fully consumed)");
+        assertEquals(1L, conn.executeScalar("SELECT 1"),
+                "the connection still runs queries after pings");
+        conn.close();
+        assertFalse(conn.ping(), "a closed connection reports false, no throw");
+    }
 }

@@ -70,6 +70,10 @@ internal class PooledConnection(
         delegate.cancel()
     }
 
+    override fun ping(): Boolean {
+        return delegate.ping()
+    }
+
     override fun isPoisoned(): Boolean {
         return delegate.isPoisoned()
     }

@@ -184,4 +184,26 @@ class ChResultSetComplexTypeTest {
         org.junit.jupiter.api.Assertions.assertThrows(java.sql.SQLException.class, () -> rs.getArray(1));
         assertFalse(rs.wasNull());
     }
+
+    /**
+     * A whole-column Nested value — announced as {@code Array(Tuple(...))} — renders
+     * through {@code getString} as a ClickHouse-style nested literal with quoted string
+     * members (reference: ClickHouseNestedValueTest#testMultipleValues, the
+     * SQL-expression rendering facet; the plain nested-array rendering is covered
+     * above by {@code getString_onNestedArray_rendersNested}).
+     */
+    @Test
+    void getString_onNestedWholeColumn_rendersTupleLiterals() throws Exception {
+        @SuppressWarnings("unchecked")
+        io.github.danielbunting.clickhouse.types.ColumnCodec<Object> codec =
+                (io.github.danielbunting.clickhouse.types.ColumnCodec<Object>)
+                        new io.github.danielbunting.clickhouse.types.DefaultTypeParser()
+                                .parse("Array(Tuple(a UInt32, b String))");
+        ChResultSet rs = RsFixtures.open(RsFixtures.complexCol(
+                "n", "Array(Tuple(a UInt32, b String))", codec,
+                (Object) List.of(List.of(10L, "x"), List.of(20L, "y"))));
+        assertTrue(rs.next());
+        assertEquals("[[10, 'x'], [20, 'y']]", rs.getString(1),
+                "numbers render bare, string members single-quoted");
+    }
 }

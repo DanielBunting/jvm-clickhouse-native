@@ -628,26 +628,11 @@ class JdbcSessionIT {
     }
 
     /**
-     * KNOWN BUG (expected failure, documents the defect): every error a ResultSet
-     * surfaces must be a {@link SQLException} per the JDBC contract of
-     * {@link ResultSet#next()}.
-     *
-     * <p>Actual behavior today: when the server reports an error mid-stream (here
-     * TOO_MANY_ROWS_OR_BYTES, 396, deferred until rows have already been produced),
-     * {@code ChResultSet.next()} lets the core's raw
-     * {@link io.github.danielbunting.clickhouse.ServerException} (a RuntimeException)
-     * escape from the underlying block iterator
-     * ({@code QueryResultImpl.BlockIterator.hasNext} → {@code ChResultSet.next},
-     * clickhouse-native-client-jdbc/src/main/java/io/github/danielbunting/clickhouse/jdbc/ChResultSet.java).
-     *
-     * <p>How to fix: in {@code ChResultSet.next()} (and any other method that pulls
-     * from the core iterator), catch {@code RuntimeException} and rethrow as
-     * {@code new SQLException(...)} with the cause chained — mirroring what
-     * {@code ClickHouseDriver.connect} and {@code ChConnection.close} already do. This
-     * test passes once the wrap is in place.
+     * A deferred server error on the session connection surfaces as an
+     * {@link SQLException} from {@code ResultSet.next()} (was knownBug 3 — same
+     * mid-stream translation as {@code JdbcStatementIT#midStreamServerErrorSurfacesAsSqlException}).
      */
-    @Test
-    void knownBug_deferredServerErrorMustSurfaceAsSqlException() throws Exception {
+    void deferredServerErrorSurfacesAsSqlException() throws Exception {
         try (Connection conn = DriverManager.getConnection(
                         url() + "?settings.max_result_rows=5");
                 Statement st = conn.createStatement()) {

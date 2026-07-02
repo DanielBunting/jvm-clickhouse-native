@@ -283,6 +283,19 @@ class JdbcValuesTest {
             assertEquals(Timestamp.from(i), ts);
         }
 
+        /**
+         * Nanosecond fidelity (reference: DataTypeUtilsTests
+         * #testToLocalDateTimeNanosPreservedWithTimeZone): sub-second precision must
+         * survive the Instant->Timestamp conversion to the full nine digits.
+         */
+        @Test
+        void instantToTimestampPreservesNanos() throws SQLException {
+            Instant i = Instant.parse("2026-05-30T12:34:56.123456789Z");
+            Timestamp ts = JdbcValues.toTimestamp(i);
+            assertEquals(123456789, ts.getNanos(), "all nine fractional digits preserved");
+            assertEquals(Timestamp.from(i), ts);
+        }
+
         @Test
         void timestampPassthrough() throws SQLException {
             Timestamp ts = Timestamp.from(Instant.parse("2026-01-01T00:00:00Z"));

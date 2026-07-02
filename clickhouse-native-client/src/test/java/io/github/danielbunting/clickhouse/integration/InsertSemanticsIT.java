@@ -326,4 +326,39 @@ class InsertSemanticsIT extends TypeRoundTripBase {
                     "xxHash64 defaults must be real hashes, not zero-filled");
         });
     }
+
+    /**
+     * An INSERT's {@code log_comment} lands in {@code system.query_log} (reference:
+     * client-v2 InsertTests#testLogComment).
+     */
+    @Test
+    void insertLogCommentIsRecordedInQueryLog() {
+        withTable("ins_sem_logc", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table + " (a Int64) ENGINE = MergeTree ORDER BY a");
+            String comment = "ins_log_comment_" + System.nanoTime();
+            conn.execute("INSERT INTO " + table + " VALUES (1)", Map.of("log_comment", comment));
+
+            conn.execute("SYSTEM FLUSH LOGS");
+            org.junit.jupiter.api.Assertions.assertTrue(conn.executeScalar(
+                            "SELECT count() FROM system.query_log WHERE log_comment = '" + comment + "'") >= 1,
+                    "the INSERT's log_comment must be recorded in system.query_log");
+        });
+    }
+
+    /**
+     * The caller's per-insert settings map is not mutated (reference: client-v2
+     * InsertTests#testInsertSettingsNotChanged).
+     */
+    @Test
+    void insertSettingsMapIsNotMutatedByExecution() {
+        withTable("ins_sem_immut", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table + " (a Int64) ENGINE = MergeTree ORDER BY a");
+            java.util.Map<String, String> settings = new java.util.HashMap<>();
+            settings.put("insert_deduplication_token", "tok_immutable");
+            java.util.Map<String, String> snapshot = new java.util.HashMap<>(settings);
+
+            conn.execute("INSERT INTO " + table + " VALUES (1)", settings);
+            assertEquals(snapshot, settings, "execute() must not mutate the caller's settings map");
+        });
+    }
 }

@@ -204,4 +204,21 @@ class DecimalEdgeCasesTest {
         assertEquals(3, back.scale());
         assertEquals(0, BigDecimal.ZERO.compareTo(back));
     }
+
+    /**
+     * Fractional float boundaries convert exactly (reference: NumberConverterTest
+     * #testToBigDecimalPreservesFractionalFloatBoundaries): the codec routes Numbers
+     * through {@code new BigDecimal(value.toString())}, so {@code 0.0001f} lands as
+     * exactly 0.0001 — not the widened binary-double artifact
+     * {@code 0.000099999999...} that {@code new BigDecimal((double) f)} would produce.
+     */
+    @org.junit.jupiter.api.Test
+    void floatBoundary_convertsViaToString_notBinaryDouble() {
+        DecimalCodec codec = new DecimalCodec(9, 4);
+        Object arr = codec.allocate(2);
+        codec.set(arr, 0, 0.0001f);
+        codec.set(arr, 1, 1.1f);
+        assertEquals(new BigDecimal("0.0001"), codec.get(arr, 0));
+        assertEquals(new BigDecimal("1.1000"), codec.get(arr, 1));
+    }
 }

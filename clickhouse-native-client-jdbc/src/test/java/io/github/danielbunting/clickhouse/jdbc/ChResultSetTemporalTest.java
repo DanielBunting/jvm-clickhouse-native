@@ -96,36 +96,34 @@ class ChResultSetTemporalTest {
 
     /**
      * Zone-carrying temporal getters (reference: jdbc-v1
-     * ClickHouseResultSetTest#testDateTimeWithoutTimezone, where {@code getObject(col,
-     * OffsetDateTime.class)} / {@code ZonedDateTime.class} return zone-aware views and
-     * the plain {@code getObject} is a LocalDateTime).
-     *
-     * <p>DEVIATION: this driver boxes DateTime/DateTime64 as an absolute
-     * {@link Instant} (the plain {@code getObject} return) and offers no
-     * OffsetDateTime/ZonedDateTime/LocalDateTime coercions — those requests throw
-     * SQLException. Callers zone the Instant themselves; a {@code session_timezone}
-     * only shifts how the server interprets wall-clock literals, never the Instant
-     * contract here.
+     * ClickHouseResultSetTest#testDateTimeWithoutTimezone). The driver boxes
+     * DateTime/DateTime64 as an absolute {@link Instant}; {@code getObject(col, type)}
+     * additionally derives zoned/local views AT UTC — the zone never shifts the stored
+     * instant (a {@code session_timezone} only affects how the server interprets
+     * wall-clock literals). Callers wanting another zone call
+     * {@code withZoneSameInstant} themselves. No Calendar semantics.
      */
     @Test
-    void getObject_zonedTemporalTypes_unsupportedInstantContract() throws SQLException {
+    void getObject_zonedTemporalTypes_deriveUtcViewsFromTheInstant() throws SQLException {
         Instant when = Instant.parse("2026-05-30T13:45:07Z");
         ChResultSet rs = RsFixtures.open(
                 RsFixtures.complexCol("t", "DateTime", new DateTimeCodec(null), when));
         assertTrue(rs.next());
 
-        // The supported surface: raw Instant, Instant passthrough, Timestamp coercion.
+        // The core surface: raw Instant, Instant passthrough, Timestamp coercion.
         assertEquals(when, rs.getObject(1));
         assertEquals(when, rs.getObject(1, Instant.class));
         assertEquals(Timestamp.from(when), rs.getObject(1, Timestamp.class));
 
-        // The reference's zone-aware coercions have no counterpart.
-        assertThrows(SQLException.class,
-                () -> rs.getObject(1, java.time.OffsetDateTime.class));
-        assertThrows(SQLException.class,
-                () -> rs.getObject(1, java.time.ZonedDateTime.class));
-        assertThrows(SQLException.class,
-                () -> rs.getObject(1, java.time.LocalDateTime.class));
+        // Zoned/local views derived at UTC — same instant, explicit zone.
+        assertEquals(when.atZone(java.time.ZoneOffset.UTC),
+                rs.getObject(1, java.time.ZonedDateTime.class));
+        assertEquals(when.atOffset(java.time.ZoneOffset.UTC),
+                rs.getObject(1, java.time.OffsetDateTime.class));
+        assertEquals(java.time.LocalDateTime.ofInstant(when, java.time.ZoneOffset.UTC),
+                rs.getObject(1, java.time.LocalDateTime.class));
+        assertEquals(when, rs.getObject(1, java.time.ZonedDateTime.class).toInstant(),
+                "the zoned view preserves the absolute instant exactly");
     }
 
     @Test

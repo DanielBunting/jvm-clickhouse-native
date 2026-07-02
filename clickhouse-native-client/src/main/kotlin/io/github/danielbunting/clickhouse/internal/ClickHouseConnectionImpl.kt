@@ -225,6 +225,18 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
         return client.isPoisoned()
     }
 
+    override fun ping(): Boolean {
+        // The guard serializes the ping against any in-flight operation on this
+        // single-threaded connection; a held guard means "busy", which is not "dead",
+        // but blocking here would defeat a liveness probe — so acquire like any op.
+        guard.acquire()
+        try {
+            return client.ping()
+        } finally {
+            guard.release()
+        }
+    }
+
     override fun close() {
         client.close()
     }

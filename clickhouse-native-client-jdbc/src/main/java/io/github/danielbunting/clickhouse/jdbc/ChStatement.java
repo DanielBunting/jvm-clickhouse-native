@@ -88,12 +88,30 @@ public class ChStatement implements Statement {
         }
     }
 
+    /**
+     * Per-query server settings derived from statement state: a positive
+     * {@link #setQueryTimeout} travels as {@code max_execution_time}, so the SERVER
+     * aborts the query (TIMEOUT_EXCEEDED, code 159) — surfaced as an
+     * {@link java.sql.SQLTimeoutException} by {@code wrap}.
+     *
+     * @return the settings map, or {@code null} when no statement setting applies
+     */
+    private java.util.Map<String, String> perQuerySettings() {
+        if (queryTimeoutSeconds > 0) {
+            return java.util.Map.of("max_execution_time", String.valueOf(queryTimeoutSeconds));
+        }
+        return null;
+    }
+
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
         checkOpen();
         try {
             currentUpdateCount = -1;
-            currentResultSet = new ChResultSet(conn.core().query(sql));
+            java.util.Map<String, String> settings = perQuerySettings();
+            currentResultSet = new ChResultSet(settings == null
+                    ? conn.core().query(sql)
+                    : conn.core().query(sql, settings));
             return currentResultSet;
         } catch (ClickHouseException e) {
             throw wrap(e);
@@ -104,7 +122,12 @@ public class ChStatement implements Statement {
     public int executeUpdate(String sql) throws SQLException {
         checkOpen();
         try {
-            conn.core().execute(sql);
+            java.util.Map<String, String> settings = perQuerySettings();
+            if (settings == null) {
+                conn.core().execute(sql);
+            } else {
+                conn.core().execute(sql, settings);
+            }
             currentResultSet = null;
             currentUpdateCount = 0;
             return 0;

@@ -140,7 +140,10 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
         if (type.equals("JSON", ignoreCase = true) || startsWithIgnoreCase(type, "JSON(")
             || startsWithIgnoreCase(type, "Object(")
         ) {
-            return JsonColumnCodec(this)
+            // The declaration carries the TYPED paths (e.g. JSON(a.b Int64)), which the
+            // codec must know up front — they are serialized as their declared type, not
+            // as Dynamic sub-columns, and are not discoverable from the wire.
+            return JsonColumnCodec(this, type)
         }
 
         if (startsWithIgnoreCase(type, "Array(")) {

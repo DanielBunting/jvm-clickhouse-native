@@ -156,4 +156,24 @@ class TupleTypesIT extends TypeRoundTripBase {
             assertTuple(rows.get(2)[1], Arrays.asList(4_294_967_295L, ""), "Bulk row 3");
         });
     }
+
+    /**
+     * A single-element {@code Tuple(UInt32)} (reference: ClickHouseTupleValueTest
+     * #testSingleValue) decodes to a one-element List — the arity-1 edge of the tuple
+     * codec, distinct from the 2/3-element shapes above.
+     */
+    @Test
+    void singleElementTupleDecodeRoundTrips() {
+        withTable("tuple_single", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, t Tuple(UInt32)) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, t) VALUES (1, tuple(7))");
+
+            List<Object[]> rows = decode(conn, "SELECT t FROM " + table + " ORDER BY id");
+            assertEquals(1, rows.size());
+            List<?> t = (List<?>) rows.get(0)[0];
+            assertEquals(1, t.size(), "arity-1 tuple");
+            assertEquals(7L, ((Number) t.get(0)).longValue());
+        });
+    }
 }

@@ -249,4 +249,77 @@ class ChResultSetPrimitiveTest {
         assertEquals(99L, rs.getLong(1));
         assertFalse(rs.wasNull());
     }
+
+    /**
+     * Wide integers (Int128/Int256/UInt128/UInt256) through the narrow accessors
+     * (reference: client-v2 AbstractBinaryReaderTest#testReadingNumbers /
+     * #testGetBigDecimalForIntegerWidths8To256): in-range values narrow cleanly via
+     * getInt/getLong, out-of-range values throw rather than truncate, and
+     * getBigDecimal is exact at the extremes.
+     */
+    @org.junit.jupiter.api.Test
+    void wideInts_narrowAccessorsRangeCheckAndBigDecimalIsExact() throws SQLException {
+        java.math.BigInteger int128Max = java.math.BigInteger.TWO.pow(127)
+                .subtract(java.math.BigInteger.ONE);
+        java.math.BigInteger uint256Max = java.math.BigInteger.TWO.pow(256)
+                .subtract(java.math.BigInteger.ONE);
+
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("small128", "Int128",
+                        new io.github.danielbunting.clickhouse.types.codec.Int128Codec(),
+                        java.math.BigInteger.valueOf(42)),
+                RsFixtures.complexCol("max128", "Int128",
+                        new io.github.danielbunting.clickhouse.types.codec.Int128Codec(),
+                        int128Max),
+                RsFixtures.complexCol("neg256", "Int256",
+                        new io.github.danielbunting.clickhouse.types.codec.Int256Codec(),
+                        java.math.BigInteger.valueOf(Long.MIN_VALUE)),
+                RsFixtures.complexCol("maxU256", "UInt256",
+                        new io.github.danielbunting.clickhouse.types.codec.UInt256Codec(),
+                        uint256Max));
+        assertTrue(rs.next());
+
+        // In-range narrows cleanly.
+        assertEquals(42, rs.getInt(1));
+        assertEquals(42L, rs.getLong(1));
+        assertEquals(Long.MIN_VALUE, rs.getLong(3), "Long.MIN_VALUE fits getLong exactly");
+
+        // Out-of-range never truncates silently (the exception TYPE is the known bug below).
+        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> rs.getInt(2));
+        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> rs.getLong(2));
+        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> rs.getInt(3),
+                "Long.MIN_VALUE overflows int");
+        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> rs.getLong(4));
+
+        // getBigDecimal is exact at every width extreme.
+        assertEquals(new java.math.BigDecimal(int128Max), rs.getBigDecimal(2));
+        assertEquals(new java.math.BigDecimal(uint256Max), rs.getBigDecimal(4));
+        assertEquals(java.math.BigDecimal.valueOf(Long.MIN_VALUE), rs.getBigDecimal(3));
+    }
+
+    /**
+     * KNOWN BUG — asserts the CORRECT behavior and currently FAILS.
+     *
+     * <p>Narrowing an out-of-range WIDE integer (Int128/Int256/UInt128/UInt256, backed
+     * by BigInteger) via {@code getInt}/{@code getLong} leaks a raw
+     * {@link ArithmeticException} from {@code BigInteger.intValueExact()} instead of the
+     * JDBC-spec {@link SQLException} that the Int64 narrowing path throws (see
+     * {@code int64_getInt_outOfRangeThrows}). The exception surface must be uniform.
+     *
+     * <p>Fix approach: catch {@code ArithmeticException} in the BigInteger branch of
+     * {@code JdbcValues}' int/long narrowing and rethrow as {@code SQLException}, exactly
+     * like the long-based range check.
+     */
+    @org.junit.jupiter.api.Test
+    void knownBug_wideIntOverflowMustThrowSqlExceptionNotArithmetic() throws SQLException {
+        java.math.BigInteger int128Max = java.math.BigInteger.TWO.pow(127)
+                .subtract(java.math.BigInteger.ONE);
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("max128", "Int128",
+                        new io.github.danielbunting.clickhouse.types.codec.Int128Codec(),
+                        int128Max));
+        assertTrue(rs.next());
+        org.junit.jupiter.api.Assertions.assertThrows(SQLException.class, () -> rs.getInt(1),
+                "JDBC contract: conversion overflow surfaces as SQLException");
+    }
 }

@@ -36,17 +36,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Contract summary being asserted (from the production code):
  * <ul>
- *   <li>A client-side mapping/codec failure in {@code add()} does not itself poison; the
- *       try-with-resources {@code close()} (initialized &amp;&amp; !completed) poisons. Net: poisoned,
- *       0 rows committed.</li>
- *   <li>A server EXCEPTION (bad SQL, server-side insert rejection) does NOT poison
- *       ({@code NativeClientImpl.readMessage} rethrows {@code ServerException} without setting
- *       {@code poisoned}); the wire stays in spec and the connection is reusable.</li>
- *   <li>A {@code QueryResult.close()} drains the remaining stream synchronously to leave the wire
- *       clean — even when closed early over a huge result.</li>
+ *   <li>A client-side mapping/codec failure in {@code add()} throws BEFORE any block bytes
+ *       exist; the try-with-resources {@code close()} then ends the INSERT gracefully
+ *       (terminating empty block + drain), discarding buffered rows. Net: NOT poisoned,
+ *       connection reusable, exactly 0 rows committed.</li>
+ *   <li>A serialization failure at flush time (write-path codec rejection) is staged
+ *       in-memory before any wire bytes, so it too leaves the wire byte-clean and the
+ *       graceful {@code close()} keeps the connection healthy.</li>
+ *   <li>A server EXCEPTION (bad SQL, server-side insert rejection, unknown table at init)
+ *       is TERMINAL and in-spec: not poisoned, connection reusable.</li>
+ *   <li>Only a genuine I/O failure (socket death) or a failed graceful termination
+ *       poisons, so a pool discards the connection.</li>
  * </ul>
- *
- * <p>Run: {@code ./gradlew :clickhouse-native-client:integrationTest --tests '*InsertFailureIntegrityIT'}
  */
 @Tag("integration")
 class InsertFailureIntegrityIT extends IntegrationTestBase {
@@ -105,7 +106,7 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
 
     /** Trigger A: a value not present in the target Enum8 (client-side codec rejection). */
     @Test
-    void badEnumNameMidInsert_poisons_andCommitsNothing() {
+    void badEnumNameMidInsert_staysClean_andCommitsNothing() {
         String table = "ifi_enum_" + System.nanoTime();
         try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
             conn.execute("CREATE TABLE " + table
@@ -119,14 +120,15 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
                     ins.complete();
                 }
             });
-            assertTrue(conn.isPoisoned(),
-                    "bad-enum mid-insert leaves the connection mid-stream -> must be poisoned");
+            assertFalse(conn.isPoisoned(),
+                    "the rejection happened before any block bytes; close() ends the INSERT "
+                            + "gracefully, so the connection must stay healthy");
 
-            // Verify on a FRESH connection (the poisoned one is unusable): nothing committed.
-            try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
-                assertEquals(0L, count(check, table),
-                        "a failed enum insert must commit exactly 0 rows (no partial block)");
-            }
+            // The SAME connection proves the wire is clean: nothing committed, still usable.
+            assertEquals(0L, count(conn, table),
+                    "a failed enum insert must commit exactly 0 rows (no partial block)");
+            assertEquals(1L, conn.executeScalar("SELECT 1"),
+                    "connection reusable after the aborted insert");
         } finally {
             dropQuietly(table);
         }
@@ -138,10 +140,10 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
      * <p>CONTRACT: a value outside the column's range is REJECTED up front with an
      * {@link IllegalArgumentException} (see {@code Int8Codec.set}/{@code setLong} →
      * {@code IntegerRanges}), rather than silently narrowed to {@code (byte) 9999 == 15} and
-     * committed as a clean write. The bad {@code add()} throws client-side; because {@code init()}
-     * already opened the insert stream, the abandoned inserter's {@code close()} poisons the
-     * connection, and NOTHING is committed (no partial write). This pins that data-integrity
-     * guarantee — silent truncation on insert was a real corruption bug, now fixed.
+     * committed as a clean write. The bad {@code add()} throws client-side before any block
+     * bytes exist; {@code close()} then ends the INSERT gracefully, so NOTHING is committed
+     * and the connection stays healthy. This pins that data-integrity guarantee — silent
+     * truncation on insert was a real corruption bug, now fixed.
      */
     @Test
     void numericOverflowMidInsert_isRejected_andCommitsNothing() {
@@ -159,12 +161,10 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
                 }
             });
 
-            assertTrue(conn.isPoisoned(),
-                    "an insert abandoned mid-stream by a rejected value must poison the connection");
-            try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
-                assertEquals(0L, count(check, table),
-                        "a rejected-overflow insert must commit exactly 0 rows (no half-write)");
-            }
+            assertFalse(conn.isPoisoned(),
+                    "a rejected value aborts the insert cleanly; the connection stays healthy");
+            assertEquals(0L, count(conn, table),
+                    "a rejected-overflow insert must commit exactly 0 rows (no half-write)");
         } finally {
             dropQuietly(table);
         }
@@ -195,8 +195,8 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
 
             try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
                 if (threw) {
-                    assertTrue(conn.isPoisoned(),
-                            "null-into-non-nullable rejected mid-insert must poison");
+                    assertFalse(conn.isPoisoned(),
+                            "null-into-non-nullable rejected mid-insert aborts cleanly");
                     assertEquals(0L, count(check, table),
                             "rejected null insert must commit exactly 0 rows");
                 } else {
@@ -242,12 +242,11 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
                     ins.complete();
                 }
             });
-            assertTrue(conn.isPoisoned(), "failed second insert must poison");
+            assertFalse(conn.isPoisoned(),
+                    "the failed second insert aborts cleanly; the connection stays healthy");
 
-            try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
-                assertEquals(2L, count(check, table),
-                        "exactly the prior 2 rows survive; the failed batch added nothing");
-            }
+            assertEquals(2L, count(conn, table),
+                    "exactly the prior 2 rows survive; the failed batch added nothing");
         } finally {
             dropQuietly(table);
         }
@@ -350,7 +349,7 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
      * MUST poison so the connection is never silently reused dirty.
      */
     @Test
-    void inserterClosedWithoutComplete_poisons() {
+    void inserterClosedWithoutComplete_terminatesGracefully() {
         String table = "ifi_abandon_" + System.nanoTime();
         try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
             conn.execute("CREATE TABLE " + table
@@ -360,16 +359,17 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
             ins.init();
             ins.add(new IntRow(1, 10));
             ins.add(new IntRow(2, 20));
-            ins.close(); // abandon WITHOUT complete() — server still awaiting terminating block
+            ins.close(); // abandon WITHOUT complete() — close() ends the INSERT gracefully
 
-            assertTrue(conn.isPoisoned(),
-                    "an inserter abandoned (close without complete) leaves the wire mid-INSERT "
-                            + "-> MUST poison so a pool never recycles it dirty");
+            assertFalse(conn.isPoisoned(),
+                    "close() without complete() sends the terminating block and drains, "
+                            + "leaving the connection healthy (buffered rows discarded)");
 
-            try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
-                assertEquals(0L, count(check, table),
-                        "an abandoned (never-completed) insert must commit exactly 0 rows");
-            }
+            assertEquals(0L, count(conn, table),
+                    "an abandoned (never-completed) insert must commit exactly 0 rows "
+                            + "(buffered rows are deliberately discarded, not flushed)");
+            assertEquals(1L, conn.executeScalar("SELECT 1"),
+                    "connection reusable after the abandoned insert");
         } finally {
             dropQuietly(table);
         }
@@ -541,21 +541,12 @@ class InsertFailureIntegrityIT extends IntegrationTestBase {
                 }
             });
 
-            // init() catches RuntimeException and unconditionally markPoisoned()s, even though a
-            // server EXCEPTION here is technically a clean wire. Document the observed behavior:
-            // the connection is poisoned by the inserter's init() error path (conservative).
-            // Whatever the flag, a fresh connection proves the server itself is fine.
-            boolean poisoned = conn.isPoisoned();
-            try (ClickHouseConnection check = ClickHouseConnection.open(config())) {
-                assertEquals(1L, check.executeScalar("SELECT 1"),
-                        "server remains healthy regardless of inserter-init poisoning (observed "
-                                + "poisoned=" + poisoned + ")");
-            }
-            // If NOT poisoned, the same connection must still be reusable.
-            if (!poisoned) {
-                assertEquals(5L, conn.executeScalar("SELECT 2 + 3"),
-                        "if init-failure did not poison, the connection must still work");
-            }
+            // A server EXCEPTION during init is TERMINAL and in-spec: the INSERT never
+            // started streaming, the query is over, and the connection is reusable.
+            assertFalse(conn.isPoisoned(),
+                    "a server rejection at init (unknown table) must not poison");
+            assertEquals(5L, conn.executeScalar("SELECT 2 + 3"),
+                    "the same connection is reusable after the init-time server rejection");
         }
     }
 

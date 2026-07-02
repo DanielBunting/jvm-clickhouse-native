@@ -88,13 +88,23 @@ public constructor(zoneId: ZoneId?) : ColumnCodec<LongArray> {
      * Sets the value at `row` from an [Instant] (or `null` for 0).
      * Stores only whole seconds; any sub-second component of the `Instant` is
      * truncated (ClickHouse `DateTime` has 1-second resolution).
+     *
+     * `DateTime` is an unsigned 32-bit epoch-second count
+     * (1970-01-01T00:00:00Z..2106-02-07T06:28:15Z); an out-of-range instant is
+     * rejected rather than silently wrapped by the UInt32 wire cast (matching the
+     * `Date`/`Date32` codecs' range checks).
      */
     override fun set(array: LongArray, row: Int, value: Any?) {
         if (value == null) {
             array[row] = 0L
         } else {
             val instant = value as Instant
-            array[row] = instant.epochSecond
+            val seconds = instant.epochSecond
+            require(seconds in 0..MAX_EPOCH_SECOND) {
+                "DateTime value $instant is outside the supported range " +
+                    "${Instant.EPOCH}..${Instant.ofEpochSecond(MAX_EPOCH_SECOND)}"
+            }
+            array[row] = seconds
         }
     }
 
@@ -113,5 +123,10 @@ public constructor(zoneId: ZoneId?) : ColumnCodec<LongArray> {
 
     override fun javaType(): Class<*> {
         return Instant::class.java
+    }
+
+    private companion object {
+        /** Largest epoch second representable in an unsigned 32-bit `DateTime` (2106-02-07T06:28:15Z). */
+        const val MAX_EPOCH_SECOND: Long = 0xFFFF_FFFFL
     }
 }

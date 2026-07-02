@@ -113,4 +113,64 @@ class MergedFeaturesIT extends TypeRoundTripBase {
             }
         }
     }
+
+    /**
+     * An extra bound parameter that the SQL never references is ignored (reference:
+     * ClickHouseParameterizedQueryTest#testApplyMap — unknown/unused params tolerated).
+     */
+    @Test
+    void unusedExtraNamedParameterIsIgnored() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            QueryParameters params = QueryParameters.builder()
+                    .bind("n", 42)
+                    .bind("unused", "never-referenced")
+                    .build();
+            assertEquals(42L, scalar(conn, "SELECT {n:UInt32} AS v", params),
+                    "the referenced param binds; the unused one is simply ignored");
+        }
+    }
+
+    /**
+     * An {@link java.time.Instant} binds as a {@code DateTime64} parameter with
+     * sub-second fidelity (reference: client-v2 QueryTests#testParamsWithInstant): the
+     * client renders the UTC wall clock, the server casts via the declared type.
+     */
+    @Test
+    void instantParameterBindsAsDateTime64() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            java.time.Instant when = java.time.Instant.parse("2021-03-04T15:06:27.123Z");
+            long millis = scalar(conn,
+                    "SELECT toUnixTimestamp64Milli({t:DateTime64(3)}) AS v",
+                    QueryParameters.of(Map.of("t", when)));
+            assertEquals(when.toEpochMilli(), millis,
+                    "Instant parameter round-trips through DateTime64(3) at millisecond fidelity");
+        }
+    }
+
+    /**
+     * Composite parameters bind end-to-end (previously they fell through to Java
+     * {@code toString()} and the server's cast failed): a bound {@code List} drives an
+     * {@code IN {p:Array(...)}} predicate, and a bound {@code Map} echoes back through a
+     * {@code Map(...)} placeholder.
+     */
+    @Test
+    void compositeParametersBindServerSide() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            assertEquals(2L, scalar(conn,
+                    "SELECT count() FROM (SELECT arrayJoin([1, 2, 3, 4]) AS x)"
+                            + " WHERE x IN {p:Array(Int64)}",
+                    QueryParameters.of(Map.of("p", List.of(2L, 4L)))),
+                    "a bound List drives an IN predicate");
+
+            assertEquals(7L, scalar(conn, "SELECT {p:Map(String, Int64)}['k'] AS v",
+                    QueryParameters.of(Map.of("p", Map.of("k", 7L)))),
+                    "a bound Map binds through a Map placeholder");
+
+            // Strings with quotes/backslashes survive the element escaping.
+            assertEquals(1L, scalar(conn,
+                    "SELECT countEqual({p:Array(String)}, 'a\\'b') AS v",
+                    QueryParameters.of(Map.of("p", List.of("a'b", "plain")))),
+                    "escaped quote inside a string element round-trips");
+        }
+    }
 }

@@ -205,6 +205,14 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
         if (value instanceof Instant instant) {
             return quote(formatDateTime(LocalDateTime.ofInstant(instant, ZoneOffset.UTC)));
         }
+        // Zone-carrying temporals render as their UTC wall clock, matching the Instant
+        // branch above (the zone shifts the instant, then drops out of the literal).
+        if (value instanceof java.time.ZonedDateTime zdt) {
+            return quote(formatDateTime(LocalDateTime.ofInstant(zdt.toInstant(), ZoneOffset.UTC)));
+        }
+        if (value instanceof java.time.OffsetDateTime odt) {
+            return quote(formatDateTime(LocalDateTime.ofInstant(odt.toInstant(), ZoneOffset.UTC)));
+        }
         if (value instanceof Date date) {
             return quote(date.toLocalDate().toString());
         }
@@ -226,6 +234,20 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
         // array literal, e.g. ['a','b'] / [1,2] / [] (see issue clickhouse-java#2329).
         if (value instanceof java.util.Collection || value.getClass().isArray()) {
             return arrayLiteral(value);
+        }
+        // Maps render as a ClickHouse map literal, e.g. {'a': 1, 'b': 2}, recursing
+        // through toLiteral for keys and values (mirrors the Collection branch above).
+        if (value instanceof java.util.Map<?, ?> map) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (java.util.Map.Entry<?, ?> e : map.entrySet()) {
+                if (!first) {
+                    sb.append(", ");
+                }
+                first = false;
+                sb.append(toLiteral(e.getKey())).append(": ").append(toLiteral(e.getValue()));
+            }
+            return sb.append('}').toString();
         }
         // Fallback: treat as string.
         return quote(value.toString());
