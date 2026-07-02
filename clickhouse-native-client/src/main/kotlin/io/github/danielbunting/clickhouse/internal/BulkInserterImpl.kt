@@ -325,6 +325,12 @@ internal constructor(
                         // Leave the value slot at the codec's default; it is masked by the null-map.
                         continue
                     }
+                    // LowCardinality(Nullable(T)) has no parallel null-map: its null-ness lives in
+                    // the dictionary (key 0 is the NULL placeholder), so the codec stores the null.
+                    if (codecStoresNulls(codecs[i]!!)) {
+                        setValue(codecs[i]!!, col.values(), r, null)
+                        continue
+                    }
                     // A non-nullable column cannot store null; fail clearly rather than letting the
                     // codec NPE while unboxing (or silently coerce, e.g. Array -> []).
                     throw IllegalArgumentException(
@@ -512,6 +518,16 @@ internal constructor(
         @Suppress("UNCHECKED_CAST")
         private fun setValue(codec: ColumnCodec<*>, array: Any?, row: Int, value: Any?) {
             (codec as ColumnCodec<Any>).set(array as Any, row, value)
+        }
+
+        /**
+         * Whether [codec] stores nulls internally rather than via the column's parallel
+         * null-map — true for `LowCardinality(Nullable(T))`, whose dictionary reserves the
+         * NULL placeholder slot.
+         */
+        private fun codecStoresNulls(codec: ColumnCodec<*>): Boolean {
+            return codec is io.github.danielbunting.clickhouse.types.codec.LowCardinalityColumnCodec &&
+                codec.inner() is io.github.danielbunting.clickhouse.types.codec.NullableColumnCodec
         }
     }
 }
