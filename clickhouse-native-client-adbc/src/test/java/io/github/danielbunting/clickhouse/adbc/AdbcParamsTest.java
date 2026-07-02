@@ -198,6 +198,18 @@ class AdbcParamsTest {
     }
 
     @Test
+    @DisplayName("an out-of-range port fails config building as INVALID_ARGUMENT")
+    void outOfRangePortIsInvalidArgument() {
+        Map<String, Object> params = new HashMap<>();
+        params.put(AdbcParams.PARAM_HOST, "localhost");
+        params.put(AdbcParams.PARAM_PORT, 99999);
+
+        AdbcException ex = assertThrows(AdbcException.class, () -> AdbcParams.toConfig(params));
+        assertEquals(AdbcStatusCode.INVALID_ARGUMENT, ex.getStatus());
+        assertNotNull(ex.getCause(), "the config validation failure should be retained as the cause");
+    }
+
+    @Test
     @DisplayName("a boxed Long port is accepted via the Number arm")
     void longPortIsAccepted() {
         Map<String, Object> params = new HashMap<>();

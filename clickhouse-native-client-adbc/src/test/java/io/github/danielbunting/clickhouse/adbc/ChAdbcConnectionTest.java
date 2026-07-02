@@ -172,6 +172,25 @@ class ChAdbcConnectionTest {
     }
 
     @Test
+    @DisplayName("getTableSchema skips empty progress blocks in the system.columns stream")
+    void getTableSchemaSkipsEmptyBlocks(BufferAllocator allocator) throws Exception {
+        ScriptedConnection core = new ScriptedConnection();
+        core.respondTo("system.columns", io.github.danielbunting.clickhouse.test.QueryResults.of(
+                List.of("name", "type"), List.of("String", "String"),
+                List.of(
+                        io.github.danielbunting.clickhouse.adbc.TestBlocks.blockOf(),
+                        io.github.danielbunting.clickhouse.adbc.TestBlocks.blockOf(
+                                io.github.danielbunting.clickhouse.adbc.TestBlocks.stringColumn(
+                                        "name", new String[] {"id"}, null),
+                                io.github.danielbunting.clickhouse.adbc.TestBlocks.stringColumn(
+                                        "type", new String[] {"Int64"}, null)))));
+        try (ChAdbcConnection connection = AdbcTestConnections.connection(core, allocator)) {
+            Schema schema = connection.getTableSchema(null, null, "events");
+            assertEquals(List.of("id"), schema.getFields().stream().map(f -> f.getName()).toList());
+        }
+    }
+
+    @Test
     @DisplayName("getTableSchema on a missing table raises NOT_FOUND naming the table")
     void getTableSchemaMissingTableIsNotFound(BufferAllocator allocator) throws Exception {
         ScriptedConnection core = new ScriptedConnection();

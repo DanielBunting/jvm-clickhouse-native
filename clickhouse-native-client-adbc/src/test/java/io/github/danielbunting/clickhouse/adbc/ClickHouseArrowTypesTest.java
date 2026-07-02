@@ -160,6 +160,8 @@ class ClickHouseArrowTypesTest {
     static Stream<Arguments> structuralReverseRows() {
         return Stream.of(
                 Arguments.of(new ArrowType.Int(8, true), "Int8", false),
+                Arguments.of(new ArrowType.Int(16, true), "Int16", false),
+                Arguments.of(new ArrowType.Int(16, false), "UInt16", false),
                 Arguments.of(new ArrowType.Int(64, false), "UInt64", false),
                 Arguments.of(new ArrowType.Int(32, true), "Nullable(Int32)", true),
                 Arguments.of(new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), "Float32", false),
@@ -170,10 +172,13 @@ class ClickHouseArrowTypesTest {
                 Arguments.of(new ArrowType.Date(org.apache.arrow.vector.types.DateUnit.DAY), "Date32", false),
                 Arguments.of(new ArrowType.Timestamp(TimeUnit.SECOND, "UTC"), "DateTime('UTC')", false),
                 Arguments.of(new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC"), "DateTime64(3, 'UTC')", false),
+                Arguments.of(new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC"), "DateTime64(6, 'UTC')", false),
                 Arguments.of(new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC"), "DateTime64(9, 'UTC')", false),
                 Arguments.of(new ArrowType.Decimal(10, 2, 128), "Decimal(10, 2)", false),
                 Arguments.of(new ArrowType.Duration(TimeUnit.SECOND), "Time", false),
+                Arguments.of(new ArrowType.Duration(TimeUnit.MILLISECOND), "Time64(3)", false),
                 Arguments.of(new ArrowType.Duration(TimeUnit.MICROSECOND), "Time64(6)", false),
+                Arguments.of(new ArrowType.Duration(TimeUnit.NANOSECOND), "Time64(9)", false),
                 Arguments.of(new ArrowType.Interval(IntervalUnit.YEAR_MONTH), "IntervalMonth", false));
     }
 
@@ -227,5 +232,30 @@ class ClickHouseArrowTypesTest {
                 FieldType.notNullable(new ArrowType.Binary()), null);
         assertThrows(UnsupportedOperationException.class,
                 () -> ClickHouseArrowTypes.clickHouseType(field));
+    }
+
+    @Test
+    @DisplayName("unsupported widths/precisions/units inside otherwise-known families also fail clearly")
+    void reverseMapUnsupportedVariants() {
+        assertThrows(UnsupportedOperationException.class, () -> ClickHouseArrowTypes.clickHouseType(
+                new Field("c", FieldType.notNullable(new ArrowType.Int(128, true)), null)),
+                "an unknown integer width");
+        assertThrows(UnsupportedOperationException.class, () -> ClickHouseArrowTypes.clickHouseType(
+                new Field("c", FieldType.notNullable(new ArrowType.FloatingPoint(
+                        FloatingPointPrecision.HALF)), null)),
+                "a half-precision float");
+        assertThrows(UnsupportedOperationException.class, () -> ClickHouseArrowTypes.clickHouseType(
+                new Field("c", FieldType.notNullable(new ArrowType.Interval(
+                        IntervalUnit.DAY_TIME)), null)),
+                "a DAY_TIME interval");
+    }
+
+    @Test
+    @DisplayName("non-calendar interval units map to their exact Duration resolution")
+    void intervalUnitsMapToDurationResolutions() {
+        assertEquals(new ArrowType.Duration(TimeUnit.MICROSECOND),
+                ClickHouseArrowTypes.arrowField("i", "IntervalMicrosecond").getType());
+        assertEquals(new ArrowType.Duration(TimeUnit.MILLISECOND),
+                ClickHouseArrowTypes.arrowField("i", "IntervalMillisecond").getType());
     }
 }

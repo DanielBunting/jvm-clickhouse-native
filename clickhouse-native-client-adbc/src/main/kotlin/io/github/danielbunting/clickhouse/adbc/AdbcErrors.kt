@@ -28,10 +28,6 @@ internal object AdbcErrors {
         return 0
     }
 
-    /** A cancellation surfaced as [AdbcStatusCode.CANCELLED]. */
-    fun cancelled(message: String, cause: Throwable? = null): AdbcException =
-        AdbcException(message, cause, AdbcStatusCode.CANCELLED, null, 0)
-
     fun notImplemented(message: String): AdbcException = AdbcException.notImplemented(message)
 
     fun notFound(message: String): AdbcException =

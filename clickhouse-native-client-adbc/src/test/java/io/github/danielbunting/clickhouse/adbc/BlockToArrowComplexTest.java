@@ -205,6 +205,84 @@ class BlockToArrowComplexTest {
         }
     }
 
+    // ---- bridge failure modes and remaining conversion arms -----------------------------------
+
+    @Test
+    @DisplayName("an Arrow vector family with no read-path conversion fails clearly (top-level)")
+    void unsupportedTopLevelVectorFailsClearly(BufferAllocator allocator) {
+        // Hand-build a root whose vector the bridge does not map (LargeVarChar is never
+        // produced by ClickHouseArrowTypes), then drive fill() at it directly.
+        Schema schema = new Schema(List.of(new org.apache.arrow.vector.types.pojo.Field(
+                "c",
+                org.apache.arrow.vector.types.pojo.FieldType.notNullable(
+                        new org.apache.arrow.vector.types.pojo.ArrowType.LargeUtf8()),
+                null)));
+        Block block = TestBlocks.blockOf(TestBlocks.stringColumn("c", new String[] {"x"}, null));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            UnsupportedOperationException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                    UnsupportedOperationException.class, () -> BlockToArrow.fill(root, block));
+            assertTrue(ex.getMessage().contains("c"), ex.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("an unmapped vector nested inside a container fails clearly too")
+    void unsupportedNestedVectorFailsClearly(BufferAllocator allocator) {
+        org.apache.arrow.vector.types.pojo.Field child =
+                new org.apache.arrow.vector.types.pojo.Field(
+                        "item",
+                        org.apache.arrow.vector.types.pojo.FieldType.notNullable(
+                                new org.apache.arrow.vector.types.pojo.ArrowType.LargeUtf8()),
+                        null);
+        Schema schema = new Schema(List.of(new org.apache.arrow.vector.types.pojo.Field(
+                "a",
+                org.apache.arrow.vector.types.pojo.FieldType.notNullable(
+                        new org.apache.arrow.vector.types.pojo.ArrowType.List()),
+                List.of(child))));
+        Block block = TestBlocks.blockOf(TestBlocks.column(
+                "a", "Array(String)", new ArrayColumnCodec(new StringColumnCodec()),
+                new Object[] {List.of("x")}));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    UnsupportedOperationException.class, () -> BlockToArrow.fill(root, block));
+        }
+    }
+
+    @Test
+    @DisplayName("FixedString cells hold raw byte[] as well as String — and reject anything else")
+    void fixedStringAcceptsBytesRejectsOthers(BufferAllocator allocator) {
+        List<?> rows = roundTripRows(allocator, "FixedString(4)",
+                new FixedStringCodec(4), new Object[] {new byte[] {1, 2, 3, 4}});
+        assertTrue(Arrays.equals(new byte[] {1, 2, 3, 4}, (byte[]) rows.get(0)));
+
+        Schema schema = ClickHouseArrowTypes.schema(List.of("c"), List.of("FixedString(4)"));
+        Block bad = TestBlocks.blockOf(TestBlocks.column(
+                "c", "FixedString(4)", new FixedStringCodec(4), new Object[] {42}));
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    UnsupportedOperationException.class, () -> BlockToArrow.fill(root, bad),
+                    "a numeric cell has no FixedSizeBinary byte form");
+        }
+    }
+
+    @Test
+    @DisplayName("instants nested inside containers scale to micro/nano ticks exactly")
+    void nestedInstantsScaleTicks(BufferAllocator allocator) {
+        java.time.Instant instant = java.time.Instant.parse("2021-06-15T12:34:56.789123456Z");
+        List<?> micro = roundTripRows(allocator, "Array(DateTime64(6, 'UTC'))",
+                new ArrayColumnCodec(new io.github.danielbunting.clickhouse.types.codec.DateTime64Codec(
+                        6, java.time.ZoneId.of("UTC"))),
+                new Object[] {List.of(instant)});
+        assertEquals(List.of(java.time.Instant.parse("2021-06-15T12:34:56.789123Z")),
+                micro.get(0), "micro containers truncate to microseconds");
+
+        List<?> nano = roundTripRows(allocator, "Array(DateTime64(9, 'UTC'))",
+                new ArrayColumnCodec(new io.github.danielbunting.clickhouse.types.codec.DateTime64Codec(
+                        9, java.time.ZoneId.of("UTC"))),
+                new Object[] {List.of(instant)});
+        assertEquals(List.of(instant), nano.get(0), "nano containers keep full resolution");
+    }
+
     // ---- helpers --------------------------------------------------------------------------------
 
     /** Fills one column of {@code values} into Arrow and reads every row back as Java values. */

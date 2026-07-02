@@ -239,6 +239,24 @@ class ChAdbcStatementParamsTest {
     }
 
     @Test
+    @DisplayName("an IPv4 cell (unsigned-int vector with IPv4 metadata) re-widens to dotted-quad text")
+    void ipv4UintParamRewidensToDottedQuad(BufferAllocator allocator) throws Exception {
+        ScriptedConnection core = new ScriptedConnection();
+        core.enqueueResult(QueryResults.empty(List.of("r"), List.of("Int64")));
+        Schema schema = new Schema(List.of(ClickHouseArrowTypes.arrowField("a", "IPv4")));
+        try (ChAdbcConnection connection = AdbcTestConnections.connection(core, allocator);
+                AdbcStatement statement = connection.createStatement();
+                VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+            ((org.apache.arrow.vector.UInt4Vector) root.getVector("a")).setSafe(0, 0xC0A80001);
+            root.setRowCount(1);
+            statement.setSqlQuery("SELECT r FROM t WHERE addr = ?");
+            statement.bind(root);
+            statement.executeQuery().close();
+            assertEquals("192.168.0.1", core.queriedParams.get(0).wireValue("_p1"));
+        }
+    }
+
+    @Test
     @DisplayName("a list cell renders as a ClickHouse array literal (IN-clause shape)")
     void listCellRendersArrayLiteral(BufferAllocator allocator) throws Exception {
         ScriptedConnection core = new ScriptedConnection();

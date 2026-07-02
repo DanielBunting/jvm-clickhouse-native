@@ -58,6 +58,12 @@ class SqlPlaceholdersTest {
         assertTrue(SqlPlaceholders.namedParameters("SELECT {}").isEmpty());
         assertTrue(SqlPlaceholders.namedParameters("SELECT {:Int32}").isEmpty());
         assertTrue(SqlPlaceholders.namedParameters("SELECT {name:}").isEmpty());
+        assertTrue(SqlPlaceholders.namedParameters("SELECT { :Int32}").isEmpty(),
+                "a name that is blank after trimming");
+        assertTrue(SqlPlaceholders.namedParameters("SELECT {x: }").isEmpty(),
+                "a type that is blank after trimming");
+        assertTrue(SqlPlaceholders.namedParameters("SELECT {na-me:Int32}").isEmpty(),
+                "a non-identifier character in the name");
     }
 
     @Test
@@ -77,5 +83,54 @@ class SqlPlaceholdersTest {
     void rewriteDefaultsToString() {
         assertEquals("SELECT x FROM t WHERE a = {_p1:String} AND b = {_p2:String}",
                 SqlPlaceholders.rewriteToNamedParams("SELECT x FROM t WHERE a = ? AND b = ?"));
+    }
+
+    // ---- scanner behavior at the core surface ------------------------------------------------
+    // The JDBC module's ChSqlParsingTest drives the same scanner exhaustively through
+    // ChPreparedStatement; these cases exercise it through the core API directly (per-module
+    // coverage reports only count a module's own tests).
+
+    @Test
+    @DisplayName("?s inside string literals, quoted identifiers and comments are not placeholders")
+    void quotedAndCommentedQuestionMarksIgnored() {
+        assertEquals(1, SqlPlaceholders.count(
+                "SELECT '?', 'doubled''?', 'escaped\\'?', `col?`, \"c?\" /* ? /* nested ? */ */"
+                        + " -- line ?\n # hash ?\n , ?"));
+    }
+
+    @Test
+    @DisplayName("an unterminated string literal swallows the rest of the text")
+    void unterminatedLiteralConsumesRest() {
+        assertEquals(0, SqlPlaceholders.count("SELECT 'unterminated ? ? ?"));
+    }
+
+    @Test
+    @DisplayName("?::type cast adjacency stays a placeholder; ternary ?s pair with their colon")
+    void castAndTernaryDisambiguation() {
+        assertEquals(1, SqlPlaceholders.count("SELECT ?::Int32"));
+        assertEquals(0, SqlPlaceholders.count("SELECT a > 0 ? 1 : 2 FROM t"));
+        assertEquals(1, SqlPlaceholders.count("SELECT a > 0 ? 1 : 2, ? FROM t"),
+                "the comma ends the ternary expression; the later ? is a placeholder");
+    }
+
+    @Test
+    @DisplayName("the colon inside a {name:Type} token never claims a ? as a ternary")
+    void bracedColonIsNotTernary() {
+        assertEquals(1, SqlPlaceholders.count("SELECT {n:Int32}, ? FROM t"));
+    }
+
+    @Test
+    @DisplayName("an unterminated {name:Type token still parses to the end of text")
+    void unterminatedBraceToken() {
+        List<SqlPlaceholders.NamedParameter> params =
+                SqlPlaceholders.namedParameters("SELECT {p:Int32");
+        assertEquals(1, params.size());
+        assertEquals("p", params.get(0).getName());
+    }
+
+    @Test
+    @DisplayName("a brace group without a colon is not a parameter")
+    void braceWithoutColonIgnored() {
+        assertTrue(SqlPlaceholders.namedParameters("SELECT {noColon}").isEmpty());
     }
 }

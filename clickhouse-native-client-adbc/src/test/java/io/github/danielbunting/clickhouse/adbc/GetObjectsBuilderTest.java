@@ -233,6 +233,36 @@ class GetObjectsBuilderTest {
     }
 
     @Test
+    @DisplayName("empty progress blocks inside a system-table result are skipped")
+    void emptyBlocksInSystemResultsSkipped(BufferAllocator allocator) throws Exception {
+        ScriptedConnection core = new ScriptedConnection();
+        core.respondTo("system.databases", io.github.danielbunting.clickhouse.test.QueryResults.of(
+                java.util.List.of("name"), java.util.List.of("String"),
+                java.util.List.of(
+                        TestBlocks.blockOf(),
+                        TestBlocks.blockOf(TestBlocks.stringColumn("name", new String[] {"db1"}, null)),
+                        TestBlocks.blockOf())));
+        try (ChAdbcConnection connection = AdbcTestConnections.connection(core, allocator);
+                ArrowReader reader = connection.getObjects(GetObjectsDepth.DB_SCHEMAS, null, null, null, null, null)) {
+            assertEquals(List.of("db1"), schemaNames(readSchemas(reader)));
+        }
+    }
+
+    @Test
+    @DisplayName("a core failure during the system queries maps to an IO AdbcException")
+    void coreFailureDuringSystemQueriesMapsToIo(BufferAllocator allocator) throws Exception {
+        ScriptedConnection core = new ScriptedConnection();
+        core.failNextQueryWith(new io.github.danielbunting.clickhouse.ClickHouseException("stream lost"));
+        try (ChAdbcConnection connection = AdbcTestConnections.connection(core, allocator);
+                ArrowReader reader = connection.getObjects(GetObjectsDepth.ALL, null, null, null, null, null)) {
+            org.apache.arrow.adbc.core.AdbcException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                    org.apache.arrow.adbc.core.AdbcException.class, reader::loadNextBatch);
+            assertEquals(org.apache.arrow.adbc.core.AdbcStatusCode.IO, ex.getStatus());
+            assertTrue(ex.getMessage().contains("getObjects failed"), ex.getMessage());
+        }
+    }
+
+    @Test
     @DisplayName("an empty server still reports the catalog with an empty schema list")
     void emptyServerListsCatalogWithNoSchemas(BufferAllocator allocator) throws Exception {
         ScriptedConnection core = new ScriptedConnection();

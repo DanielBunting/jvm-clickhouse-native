@@ -156,6 +156,7 @@ class ChAdbcMetadataUnitTest {
                 assertTrue(reader.loadNextBatch(), "first call delivers the batch");
                 assertFalse(reader.loadNextBatch(), "second call reports exhaustion");
                 assertFalse(reader.loadNextBatch(), "exhaustion is stable");
+                assertEquals(0L, reader.bytesRead(), "metadata readers do not track wire bytes");
             }
         }
     }
