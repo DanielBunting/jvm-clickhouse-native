@@ -148,8 +148,7 @@ class MergedFeaturesIT extends TypeRoundTripBase {
     }
 
     /**
-     * Composite parameters bind end-to-end (previously they fell through to Java
-     * {@code toString()} and the server's cast failed): a bound {@code List} drives an
+     * Composite parameters bind end-to-end: a bound {@code List} drives an
      * {@code IN {p:Array(...)}} predicate, and a bound {@code Map} echoes back through a
      * {@code Map(...)} placeholder.
      */

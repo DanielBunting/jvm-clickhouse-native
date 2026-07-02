@@ -139,9 +139,8 @@ class DynamicTypesIT extends TypeRoundTripBase {
     }
 
     /**
-     * ENCODE with the widened inference: temporals, UUID, wide integers, arrays and maps
-     * all infer a concrete ClickHouse type and round-trip through the flattened Dynamic
-     * write path (previously only scalar primitives + String were writable).
+     * ENCODE inference: temporals, UUID, wide integers, arrays and maps all infer a
+     * concrete ClickHouse type and round-trip through the flattened Dynamic write path.
      */
     @Test
     void dynamicWidenedEncodeInferenceRoundTrips() {

@@ -24,13 +24,11 @@ import org.junit.jupiter.api.Test;
  * Behavioral unit coverage for {@link ChStatement} ported from the official clickhouse-java
  * suites (v1 {@code ClickHouseStatementTest} and jdbc-v2 {@code StatementTest}): batch
  * semantics on success/failure, the {@code executeLarge*} surface, result-set identity,
- * result-set constants, and knob validation. Complements {@link ChStatementTest} (owned by
- * another change), which covers classification, wrappers and the unsupported-feature matrix.
+ * result-set constants, and knob validation. Complements {@link ChStatementTest},
+ * which covers classification, wrappers and the unsupported-feature matrix.
  *
  * <p>Deliberate/defensible divergences from clickhouse-java are pinned as passing tests
- * with a comment naming the reference expectation. Spec bugs found during porting were
- * documented as failing {@code knownBug_}-prefixed tests and have since been fixed
- * (their tests now carry a "was knownBug N" note).
+ * with a comment naming the reference expectation.
  */
 class ChStatementBehaviorTest {
 

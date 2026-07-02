@@ -156,7 +156,6 @@ class JdbcPreparedStatementExtrasIT {
             ps.addBatch();
             ps.setInt(1, 2);
             ps.addBatch();
-            // Driver contract divergence from clickhouse-java: executes rather than throws.
             int[] counts = ps.executeBatch();
             assertEquals(2, counts.length);
             assertEquals(0, ps.executeBatch().length);
@@ -338,12 +337,9 @@ class JdbcPreparedStatementExtrasIT {
 
     /**
      * Binding SQL NULL (via {@code setNull} or a null {@code setString}) works with
-     * {@code server_side_params=true} exactly as it does client-side (was knownBug 19;
-     * JDBC spec / jdbc-v2 {@code PreparedStatementTest}). Two fixes combine: a
-     * null-bound placeholder is declared {@code {_pN:Nullable(String)}} at execution
-     * time so the {@code \N} sentinel means NULL, and the wire layer dumps the
-     * sentinel as the quoted STRING {@code '\N'} (what clickhouse-client sends)
-     * instead of a bare {@code NULL} Field token, which the VALUES parser rejected.
+     * {@code server_side_params=true} exactly as it does client-side (was knownBug 19):
+     * a null-bound placeholder is declared {@code {_pN:Nullable(String)}} and travels
+     * as the {@code \N} sentinel.
      */
     @Test
     void nullBindingWorksWithServerSideParams() throws Exception {

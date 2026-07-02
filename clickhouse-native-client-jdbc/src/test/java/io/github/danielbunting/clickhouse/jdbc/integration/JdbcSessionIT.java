@@ -360,8 +360,7 @@ class JdbcSessionIT {
             st.execute("CREATE DATABASE " + database);
         }
         try (Connection conn = connect()) {
-            // The initial schema derives from the database in the URL path (was null
-            // before the bug-24 fix made ChConnection fall back to the URL path).
+            // The initial schema derives from the database in the URL path (was knownBug 24).
             assertEquals("default", conn.getSchema(),
                     "schema derives from the URL-path database");
 
@@ -751,12 +750,9 @@ class JdbcSessionIT {
 
     /**
      * A no-arg {@code getConnection()} authenticates with the credentials supplied to
-     * the DataSource constructor: {@code ChDataSource} copies the configured entries
-     * for real ({@code putAll}, not the defaults-only {@code new Properties(defaults)}
-     * wrapper), and {@code ClickHouseConfig.fromUrl(url, info)} no longer
-     * short-circuits on {@code info.isEmpty} — which ignores Properties defaults (was
-     * knownBug 21; jdbc-v2 DataSourceTest#testGetConnectionWithUserAndPassword
-     * semantics, and the {@code javax.sql.DataSource} contract).
+     * the DataSource constructor, including entries supplied as Properties DEFAULTS
+     * (was knownBug 21; javax.sql.DataSource contract, jdbc-v2
+     * DataSourceTest#testGetConnectionWithUserAndPassword).
      */
     @Test
     void dataSourceGetConnectionUsesConstructorProperties() throws Exception {

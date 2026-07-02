@@ -41,8 +41,6 @@ import org.junit.jupiter.api.Test;
  * {@code BigDecimal} scale, {@code setObject} type-hint handling, unsupported rich
  * setters, temporal renderings, array literals with NULL elements, and binding reuse
  * across executions. No server; a recording fake captures the interpolated SQL.
- *
- * <p>Kept separate from {@code ChPreparedStatementTest} (owned elsewhere).
  */
 class ChPreparedStatementBindingTest {
 

@@ -890,8 +890,7 @@ class JdbcStatementIT {
     @Test
     void setCatalogIsStorageOnlyAndUseIsNotTracked() throws Exception {
         try (Connection conn = connect()) {
-            // The initial catalog derives from the database in the URL path (was null
-            // before the bug-24 fix made ChConnection fall back to the URL path).
+            // The initial catalog derives from the database in the URL path (was knownBug 24).
             assertEquals("default", conn.getCatalog());
 
             conn.setCatalog("system");

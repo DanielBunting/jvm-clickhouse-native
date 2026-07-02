@@ -345,11 +345,9 @@ class VariantDynamicCompositeIT extends TypeRoundTripBase {
 
     /**
      * A JSON value stored in a {@code Dynamic} column decodes to its JSON text (was
-     * knownBug 32: the JSON member's serialization PREFIX — version + path list + per-path
-     * Dynamic type lists — is emitted after the member-type names and BEFORE the Dynamic
-     * discriminators; {@code DynamicColumnCodec.readFlattened} now consumes member prefixes
-     * there and member bodies after the discriminators, layout verified against 25.8 wire
-     * bytes).
+     * knownBug 32: the JSON member's serialization prefix is read before the Dynamic
+     * discriminators and its body after them — see
+     * {@code DynamicColumnCodec.readFlattened}).
      */
     @Test
     void dynamicHoldingJsonDecodes() {

@@ -316,8 +316,7 @@ class JdbcDataTypeExtrasIT {
      * {@code JdbcDataTypeTests#testMapTypesWithArrayValues}): the {@code toLiteral}
      * Map branch renders {@code {'k': v, ...}} recursively, so a
      * {@code Map(String, Array(Int32))} column is writable through parameters.
-     * (Was knownBug 20 — fixed by adding the Map branch to
-     * {@code ChPreparedStatement.toLiteral}.)
+     * (Was knownBug 20.)
      */
     @Test
     void setObjectMapBindsMapColumns() throws Exception {

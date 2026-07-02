@@ -29,11 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * holding a geo value decodes to the same nested {@code List}/{@code Double} boxing as a
  * dedicated geo column — that DECODE path is what these tests pin.
  *
- * <p>ENCODE of a geo value into a Dynamic column is <b>unsupported by design</b>:
- * {@code DynamicColumnCodec.inferClickHouseType} maps only scalar Java classes
- * (Long/Integer/Short/Byte/Double/Float/Boolean/CharSequence) and rejects everything else
- * — a {@code List}-boxed geo value has no inferable ClickHouse type. The last test pins
- * that rejection so the boundary is documented rather than silent.
+ * <p>ENCODE: there is no geo-type inference — a {@code List}-boxed geo value written into
+ * a Dynamic column is inferred as a plain nested array type ({@code Array(Float64)}),
+ * never a geo type; the last test pins that behavior.
  *
  * <p>Run with: {@code ./gradlew :clickhouse-native-client:integrationTest}
  */
