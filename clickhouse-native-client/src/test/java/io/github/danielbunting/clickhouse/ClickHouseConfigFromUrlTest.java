@@ -174,6 +174,28 @@ final class ClickHouseConfigFromUrlTest {
         assertEquals("host", cfg.host());
     }
 
+    /**
+     * A literal {@code '+'} in the URL userinfo survives parsing verbatim. RFC 3986
+     * percent-decoding only decodes {@code %XX} escapes; {@code '+'} is an ordinary
+     * character in a URL userinfo ({@code '+'}-as-space is FORM encoding,
+     * {@code application/x-www-form-urlencoded}, which does not apply here), so
+     * {@code fromUrl("chnative://user:p+ssword@host:9000")} yields password
+     * {@code "p+ssword"}, and the same holds for a {@code '+'} in the username.
+     * (was knownBug 35)
+     */
+    @Test
+    void literalPlusInUserinfoPreserved() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://user:p+ssword@host:9000");
+        assertEquals("user", cfg.username());
+        assertEquals("p+ssword", cfg.password(),
+                "a literal '+' in the password is data, not a form-encoded space");
+
+        ClickHouseConfig userPlus = ClickHouseConfig.fromUrl("chnative://us+er:pw@host:9000/db");
+        assertEquals("us+er", userPlus.username(),
+                "a literal '+' in the username is data, not a form-encoded space");
+        assertEquals("pw", userPlus.password());
+    }
+
     // -----------------------------------------------------------------------
     // Underscore hostnames
     // (reference: client-v2 ClientBuilderTest#testAddEndpointToleratesUnderscoreHostname,

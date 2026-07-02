@@ -384,7 +384,7 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
         if (closed || poisoned) {
             return false
         }
-        return try {
+        try {
             synchronized(writeLock) {
                 writer.writeVarUInt(ClientPacket.PING.code.toLong())
                 writer.flush()
@@ -397,13 +397,19 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
                     ServerPacket.PROGRESS, ServerPacket.LOG, ServerPacket.PROFILE_EVENTS -> {
                         // keep draining
                     }
-                    else -> return false
+                    else -> {
+                        // A packet outside the ping protocol was consumed and the real
+                        // Pong may still be in flight: the wire position is unknown.
+                        poisoned = true
+                        return false
+                    }
                 }
             }
-            @Suppress("UNREACHABLE_CODE")
-            false
         } catch (e: Exception) {
-            false
+            // readMessage poisons its own I/O failures; write-half and decode
+            // failures land here with the request/response state indeterminate.
+            poisoned = true
+            return false
         }
     }
 

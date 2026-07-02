@@ -74,7 +74,7 @@ class ChStatementBehaviorTest {
 
     private static ChStatement connected(ScriptedCore core) {
         ChConnection c = new ChConnection(
-                core, "jdbc:chnative://localhost:9000/default", new Properties());
+                core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
         return new ChStatement(c);
     }
 
@@ -235,7 +235,7 @@ class ChStatementBehaviorTest {
     void resultSetConstantsMatchForwardOnlyReadOnlyContract() throws SQLException {
         ScriptedCore core = new ScriptedCore();
         ChConnection conn = new ChConnection(
-                core, "jdbc:chnative://localhost:9000/default", new Properties());
+                core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
         ChStatement s = new ChStatement(conn);
         assertEquals(ResultSet.CONCUR_READ_ONLY, s.getResultSetConcurrency());
         assertEquals(ResultSet.TYPE_FORWARD_ONLY, s.getResultSetType());

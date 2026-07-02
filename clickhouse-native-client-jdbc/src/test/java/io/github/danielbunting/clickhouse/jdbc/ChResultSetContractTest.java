@@ -326,7 +326,7 @@ class ChResultSetContractTest {
     @Test
     void getStatementReturnsProducingStatement() throws SQLException {
         ChConnection conn = new ChConnection(new EmptyQueryCore(),
-                "jdbc:chnative://localhost:9000/default", new java.util.Properties());
+                "jdbc:chnative://localhost:9000/default", new java.util.Properties(), "default");
         ChStatement stmt = new ChStatement(conn);
         ResultSet rs = stmt.executeQuery("SELECT 1");
         assertSame(stmt, rs.getStatement(),

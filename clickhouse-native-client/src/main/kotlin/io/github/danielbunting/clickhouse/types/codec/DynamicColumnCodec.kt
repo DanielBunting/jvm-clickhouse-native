@@ -144,16 +144,16 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
                 codecs[i] = parser.parse(`in`.readString())
             }
 
-            // Member types with their own serialization PREFIX (currently JSON: version +
+            // Member types with their own serialization PREFIX (e.g. JSON: version +
             // path list + per-path Dynamic type lists) emit that prefix HERE — after the
             // member-type names, BEFORE the discriminators (verified against 25.8 wire
-            // bytes). Scalar/composite members contribute nothing.
-            val memberPrefixes = arrayOfNulls<Any>(numTypes)
+            // bytes). readStatePrefix recurses through container codecs
+            // (Array/Map/Tuple/Nullable/Variant), so a member like Array(JSON)
+            // contributes its element's prefix at this position too; JsonColumnCodec
+            // stashes what it reads here and consumes it in read(). Scalar members
+            // contribute nothing.
             for (i in 0 until numTypes) {
-                val codec = codecs[i]
-                if (codec is JsonColumnCodec) {
-                    memberPrefixes[i] = codec.readPrefix(`in`)
-                }
+                codecs[i]!!.readStatePrefix(`in`)
             }
 
             val discriminators = IntArray(rowCount)
@@ -175,13 +175,7 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             for (i in 0 until numTypes) {
                 val codec = codecs[i] as ColumnCodec<Any>
                 val arr = codec.allocate(counts[i])
-                val prefix = memberPrefixes[i]
-                if (prefix != null) {
-                    (codec as JsonColumnCodec).readBody(
-                        `in`, counts[i], arr as Array<Any?>, prefix as JsonColumnCodec.JsonPrefix)
-                } else {
-                    codec.read(`in`, counts[i], arr)
-                }
+                codec.read(`in`, counts[i], arr)
                 subArrays[i] = arr
             }
 
@@ -228,6 +222,13 @@ public constructor(parser: TypeParser?) : ColumnCodec<Array<Any?>> {
             out.writeVarUInt(numTypes.toLong())
             for (i in 0 until numTypes) {
                 out.writeString(typeNames[i])
+            }
+
+            // Member state prefixes, mirroring the pass in [readFlattened]. Every type
+            // this writer can infer has an empty state prefix, so no bytes are emitted
+            // today; the hook keeps the write layout aligned with the read layout.
+            for (i in 0 until numTypes) {
+                codecs[i]!!.writeStatePrefix(out)
             }
 
             // Resolve a discriminator per row (NULL == numTypes) and count occupancy.

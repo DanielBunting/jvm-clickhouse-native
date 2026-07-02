@@ -77,6 +77,16 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     static final String PARAM_NAME_PREFIX = "_p";
 
     private final String sql;
+
+    /**
+     * The bindable {@code ?} offsets of {@link #sql}, computed once at construction
+     * ({@link #placeholderPositions}) and shared by every operation on the immutable
+     * template — substitution, the server-side rewrite, and parameter counting.
+     * ({@code buildMultiRowInsert}'s tuple template is a different string and keeps
+     * its own scan.)
+     */
+    private final List<Integer> placeholderOffsets;
+
     private final int parameterCount;
 
     /**
@@ -106,10 +116,12 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     public ChPreparedStatement(ChConnection conn, String sql) {
         super(conn);
         this.sql = sql;
-        this.parameterCount = countPlaceholders(sql);
+        this.placeholderOffsets = placeholderPositions(sql);
+        this.parameterCount = placeholderOffsets.size();
         this.params = new Object[parameterCount + 1];
         this.serverSideParams = conn.useServerSideParams();
-        this.serverSideSql = this.serverSideParams ? rewriteToNamedParams(sql) : null;
+        this.serverSideSql =
+                this.serverSideParams ? rewriteToNamedParams(sql, placeholderOffsets, null) : null;
     }
 
     // ---- placeholder scanning / counting / substitution ---------------------
@@ -128,34 +140,86 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
      *   <li>{@code --}, {@code #} and {@code #!} line comments and nesting
      *       {@code /* *}{@code /} block comments (comment text is plain text);</li>
      *   <li>the {@code ?::type} cast adjacency (the {@code ::} is not a ternary
-     *       colon); and</li>
-     *   <li>the ClickHouse ternary operator {@code cond ? a : b}, disambiguated by
-     *       scanning ahead for a {@code :} at the same nesting depth before the
-     *       expression ends.</li>
+     *       colon);</li>
+     *   <li>the {@code :} inside a braced {@code {name:Type}} server-side parameter
+     *       (the name/Type separator, never a ternary colon); and</li>
+     *   <li>the ClickHouse ternary operator {@code cond ? a : b}, disambiguated in a
+     *       single left-to-right pass: each ternary-eligible {@code :} pairs with the
+     *       NEAREST preceding unpaired {@code ?} at the same nesting depth, and a
+     *       {@code ?} whose expression ends (at a same-depth {@code ,}/{@code ;}, the
+     *       enclosing bracket's close, or end of text) without being paired is a
+     *       placeholder.</li>
      * </ul>
      *
      * @param sql the SQL text
      * @return the offsets of the bindable {@code ?} characters, in order
      */
     static List<Integer> placeholderPositions(String sql) {
-        List<Integer> positions = new ArrayList<>();
         int n = sql.length();
+        // Offsets of every real-text '?', in order; ternary '?'s are struck out
+        // (by index into this list) as their pairing ':' arrives.
+        List<Integer> questionMarks = new ArrayList<>();
+        java.util.BitSet ternary = new java.util.BitSet();
+        // Bracket-opener stack; its length is the current nesting depth.
+        StringBuilder openers = new StringBuilder();
+        // Per depth, the indexes (into questionMarks) of '?'s still eligible to be a
+        // ternary condition at that depth, in scan order.
+        List<java.util.ArrayDeque<Integer>> pending = new ArrayList<>();
+        pending.add(new java.util.ArrayDeque<>());
         int i = 0;
         while (i < n) {
             char c = sql.charAt(i);
+            int depth = openers.length();
             if (c == '\'' || c == '`' || c == '"') {
                 i = skipQuoted(sql, i);
             } else if (c == '#' || (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-')) {
                 i = skipLineComment(sql, i);
             } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
                 i = skipBlockComment(sql, i);
-            } else if (c == '?') {
-                if (!isTernaryQuestionMark(sql, i + 1)) {
-                    positions.add(i);
+            } else if (c == '(' || c == '[' || c == '{') {
+                openers.append(c);
+                if (pending.size() <= openers.length()) {
+                    pending.add(new java.util.ArrayDeque<>());
                 }
                 i++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) {
+                    // The bracket's expression ends: its still-unpaired '?'s are
+                    // placeholders for good.
+                    pending.get(depth).clear();
+                    openers.setLength(depth - 1);
+                }
+                i++;
+            } else if (c == ',' || c == ';') {
+                // An expression boundary at this depth: its unpaired '?'s stay
+                // placeholders.
+                pending.get(depth).clear();
+                i++;
+            } else if (c == '?') {
+                pending.get(depth).addLast(questionMarks.size());
+                questionMarks.add(i);
+                i++;
+            } else if (c == ':') {
+                if (i + 1 < n && sql.charAt(i + 1) == ':') {
+                    i += 2; // '::' cast operator — never a ternary colon
+                } else {
+                    // Inside braces the ':' is a {name:Type} separator, not a ternary
+                    // colon; elsewhere it claims the nearest preceding unpaired '?'
+                    // at this depth (if any) as a ternary condition.
+                    boolean insideBraces = depth > 0 && openers.charAt(depth - 1) == '{';
+                    if (!insideBraces && !pending.get(depth).isEmpty()) {
+                        ternary.set(pending.get(depth).removeLast());
+                    }
+                    i++;
+                }
             } else {
                 i++;
+            }
+        }
+        List<Integer> positions = new ArrayList<>(questionMarks.size());
+        for (int q = 0; q < questionMarks.size(); q++) {
+            if (!ternary.get(q)) {
+                positions.add(questionMarks.get(q));
             }
         }
         return positions;
@@ -214,51 +278,6 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     }
 
     /**
-     * Lookahead from just past a {@code ?}: the question mark is the ternary operator
-     * (not a placeholder) when a {@code :} appears at the same nesting depth before
-     * the expression ends — i.e. before a {@code ,}/{@code ;} at that depth, a
-     * closing bracket below it, or the end of the text. A {@code ::} is the cast
-     * operator and never a ternary colon; quoted regions and comments are opaque.
-     */
-    private static boolean isTernaryQuestionMark(String sql, int from) {
-        int n = sql.length();
-        int depth = 0;
-        int i = from;
-        while (i < n) {
-            char c = sql.charAt(i);
-            if (c == '\'' || c == '`' || c == '"') {
-                i = skipQuoted(sql, i);
-            } else if (c == '#' || (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-')) {
-                i = skipLineComment(sql, i);
-            } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i);
-            } else if (c == '(' || c == '[' || c == '{') {
-                depth++;
-                i++;
-            } else if (c == ')' || c == ']' || c == '}') {
-                if (depth == 0) {
-                    return false;
-                }
-                depth--;
-                i++;
-            } else if (depth == 0 && (c == ',' || c == ';')) {
-                return false;
-            } else if (c == ':') {
-                if (i + 1 < n && sql.charAt(i + 1) == ':') {
-                    i += 2; // '::' cast operator
-                } else if (depth == 0) {
-                    return true;
-                } else {
-                    i++;
-                }
-            } else {
-                i++;
-            }
-        }
-        return false;
-    }
-
-    /**
      * Counts the bindable {@code ?} placeholders in the SQL (see
      * {@link #placeholderPositions} for exactly what the scan understands).
      *
@@ -281,10 +300,20 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
      * @throws SQLException if a placeholder has no bound value
      */
     static String substitute(String template, Object[] values) throws SQLException {
+        return substitute(template, placeholderPositions(template), values);
+    }
+
+    /**
+     * Variant of {@link #substitute(String, Object[])} taking the template's
+     * precomputed placeholder offsets, so callers holding an immutable template (the
+     * prepared statement itself) scan it only once.
+     */
+    private static String substitute(String template, List<Integer> positions, Object[] values)
+            throws SQLException {
         StringBuilder out = new StringBuilder(template.length() + 16);
         int prev = 0;
         int param = 1;
-        for (int pos : placeholderPositions(template)) {
+        for (int pos : positions) {
             out.append(template, prev, pos);
             if (param >= values.length) {
                 throw new SQLException("Missing value for parameter " + param);
@@ -464,10 +493,19 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
      * @return the SQL with named typed placeholders
      */
     static String rewriteToNamedParams(String template, Object[] values) {
+        return rewriteToNamedParams(template, placeholderPositions(template), values);
+    }
+
+    /**
+     * Variant of {@link #rewriteToNamedParams(String, Object[])} taking the template's
+     * precomputed placeholder offsets (see {@link #placeholderOffsets}).
+     */
+    private static String rewriteToNamedParams(
+            String template, List<Integer> positions, Object[] values) {
         StringBuilder out = new StringBuilder(template.length() + 16);
         int prev = 0;
         int param = 1;
-        for (int pos : placeholderPositions(template)) {
+        for (int pos : positions) {
             out.append(template, prev, pos);
             boolean nullable = values != null && (param >= values.length || values[param] == null);
             out.append('{').append(PARAM_NAME_PREFIX).append(param)
@@ -502,7 +540,7 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
 
     /** Builds the effective SQL for the current single-row parameter set. */
     private String effectiveSql() throws SQLException {
-        return substitute(sql, params);
+        return substitute(sql, placeholderOffsets, params);
     }
 
     private void setParam(int parameterIndex, Object value) throws SQLException {
@@ -522,7 +560,7 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     private String serverSideSqlFor(Object[] values) {
         for (int n = 1; n <= parameterCount; n++) {
             if (n >= values.length || values[n] == null) {
-                return rewriteToNamedParams(sql, values);
+                return rewriteToNamedParams(sql, placeholderOffsets, values);
             }
         }
         return serverSideSql;
@@ -530,14 +568,26 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
 
     // ---- execution ----------------------------------------------------------
 
+    /**
+     * Statement-derived per-query settings for the server-side path (e.g.
+     * {@code setQueryTimeout} as {@code max_execution_time}), as the non-null map the
+     * combined core overloads expect — an empty map applies no settings.
+     */
+    private java.util.Map<String, String> serverSideSettings() {
+        java.util.Map<String, String> settings = perQuerySettings();
+        return settings == null ? java.util.Map.of() : settings;
+    }
+
     @Override
     public ResultSet executeQuery() throws SQLException {
         if (serverSideParams) {
+            closeSupersededResultSet();
             try {
                 QueryParameters qp = buildServerSideParams(params);
                 currentUpdateCount = -1;
                 currentResultSet = new ChResultSet(
-                        conn.core().query(serverSideSqlFor(params), qp), this);
+                        conn.core().query(serverSideSqlFor(params), qp, serverSideSettings()),
+                        this);
                 return currentResultSet;
             } catch (ClickHouseException e) {
                 throw wrap(e);
@@ -549,10 +599,10 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     @Override
     public int executeUpdate() throws SQLException {
         if (serverSideParams) {
+            closeSupersededResultSet();
             try {
                 QueryParameters qp = buildServerSideParams(params);
-                conn.core().execute(serverSideSqlFor(params), qp);
-                currentResultSet = null;
+                conn.core().execute(serverSideSqlFor(params), qp, serverSideSettings());
                 currentUpdateCount = 0;
                 return 0;
             } catch (ClickHouseException e) {
@@ -629,14 +679,15 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
                 // The multi-row INSERT collapse is interpolation-only (it depends on
                 // splicing tuples into the VALUES clause).
                 for (Object[] row : batchRows) {
-                    conn.core().execute(serverSideSqlFor(row), buildServerSideParams(row));
+                    conn.core().execute(serverSideSqlFor(row), buildServerSideParams(row),
+                            serverSideSettings());
                 }
             } else if (trimmedUpper.startsWith("INSERT")) {
                 conn.core().execute(buildMultiRowInsert());
             } else {
                 // Non-INSERT batches: execute each substituted statement in turn.
                 for (Object[] row : batchRows) {
-                    conn.core().execute(substitute(sql, row));
+                    conn.core().execute(substitute(sql, placeholderOffsets, row));
                 }
             }
         } catch (ClickHouseException e) {

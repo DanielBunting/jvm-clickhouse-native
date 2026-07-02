@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class ChParameterMetaDataTest {
 
     private static ChPreparedStatement ps(String sql) {
-        ChConnection c = new ChConnection(new FakeCore(), "jdbc:chnative://localhost:9000/default", new Properties());
+        ChConnection c = new ChConnection(new FakeCore(), "jdbc:chnative://localhost:9000/default", new Properties(), "default");
         return new ChPreparedStatement(c, sql);
     }
 

@@ -1623,4 +1623,41 @@ class JdbcPreparedStatementExtrasIT {
             }
         }
     }
+
+    // ---- setQueryTimeout with server_side_params (knownBug 40) ---------------
+
+    /**
+     * {@link PreparedStatement#setQueryTimeout} aborts a long-running query when the
+     * connection uses {@code server_side_params=true} exactly as it does on the
+     * client-side interpolation path (compare
+     * {@code JdbcStatementIT#queryTimeoutAbortsLongRunningQuery}, was knownBug 6): the
+     * timeout travels as the per-query server setting {@code max_execution_time} and
+     * the server abort (TIMEOUT_EXCEEDED, code 159) surfaces as a
+     * {@link java.sql.SQLTimeoutException}. (was knownBug 40)
+     */
+    @Test
+    void queryTimeoutAppliesWithServerSideParams() throws Exception {
+        try (Connection conn = connect(true);
+                PreparedStatement ps = conn.prepareStatement("SELECT sleep(3), ?")) {
+            ps.setQueryTimeout(1);
+            assertEquals(1, ps.getQueryTimeout());
+            ps.setInt(1, 42);
+            // The bound placeholder forces the server-side {_p1:...} path.
+            assertThrows(java.sql.SQLTimeoutException.class, () -> {
+                try (ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                }
+            }, "a query exceeding the 1s timeout must abort server-side "
+                    + "even with server_side_params=true");
+
+            // The connection stays healthy after the server-side abort.
+            try (PreparedStatement probe = conn.prepareStatement("SELECT ?")) {
+                probe.setInt(1, 7);
+                try (ResultSet rs = probe.executeQuery()) {
+                    assertTrue(rs.next());
+                    assertEquals(7, rs.getInt(1));
+                }
+            }
+        }
+    }
 }

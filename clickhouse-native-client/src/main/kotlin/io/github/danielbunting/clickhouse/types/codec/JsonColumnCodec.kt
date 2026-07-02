@@ -4,6 +4,7 @@ import io.github.danielbunting.clickhouse.ProtocolException
 import io.github.danielbunting.clickhouse.protocol.BinaryReader
 import io.github.danielbunting.clickhouse.protocol.BinaryWriter
 import io.github.danielbunting.clickhouse.types.ColumnCodec
+import io.github.danielbunting.clickhouse.types.DefaultTypeParser
 import io.github.danielbunting.clickhouse.types.TypeParser
 import java.io.IOException
 
@@ -122,6 +123,31 @@ public constructor(parser: TypeParser?, declaration: String?) : ColumnCodec<Arra
     )
 
     /**
+     * Prefix stashed by [readStatePrefix] for the next [read] to consume. The state
+     * prefix and the body are read at different wire positions when this codec sits
+     * inside a `Dynamic` member (prefix before the Dynamic discriminators, body after
+     * them), so the prefix travels between the two calls via this field. [read] always
+     * clears it, and every [readStatePrefix] overwrites it, so a stash can never
+     * outlive its own block: Dynamic member codecs are constructed fresh per block by
+     * the [TypeParser], and a registry-cached top-level codec is driven strictly
+     * readStatePrefix-then-read per column on the connection's single read thread.
+     */
+    private var pendingPrefix: JsonPrefix? = null
+
+    /**
+     * Reads the JSON serialization prefix at the column's state-prefix position and
+     * stashes it in [pendingPrefix] for the next [read]. For a top-level `JSON` column
+     * the state prefix immediately precedes the column body, so consuming the prefix
+     * here instead of inline in [read] leaves the byte order unchanged; for a `JSON`
+     * (or container-of-JSON) member of a `Dynamic` column this is the member-prefix
+     * position before the discriminators, which is exactly where the server puts it.
+     */
+    @Throws(IOException::class)
+    override fun readStatePrefix(`in`: BinaryReader) {
+        pendingPrefix = readPrefix(`in`)
+    }
+
+    /**
      * Reads the JSON column's serialization PREFIX: version, dynamic-path names, and each
      * dynamic path's Dynamic type list. TYPED paths (declared in the column type) are NOT
      * on this list — they serialize as their declared type with no Dynamic framing.
@@ -165,10 +191,16 @@ public constructor(parser: TypeParser?, declaration: String?) : ColumnCodec<Arra
     @Throws(IOException::class)
     @Suppress("UNCHECKED_CAST")
     override fun read(`in`: BinaryReader, rowCount: Int, dest: Array<Any?>) {
+        // Consume the stashed prefix unconditionally: even a zero-row read (a Dynamic
+        // member no row selects) retires its prefix, since the body it framed is empty.
+        val stashed = pendingPrefix
+        pendingPrefix = null
         if (rowCount == 0) {
             return
         }
-        readBody(`in`, rowCount, dest, readPrefix(`in`))
+        // No stash means no readStatePrefix ran for this column (e.g. a JSON path
+        // nested inside another JSON prefix): the prefix is inline before the body.
+        readBody(`in`, rowCount, dest, stashed ?: readPrefix(`in`))
     }
 
     /**
@@ -574,48 +606,40 @@ public constructor(parser: TypeParser?, declaration: String?) : ColumnCodec<Arra
             }
             val inner = declaration.substring(open + 1, declaration.length - 1)
             val out = ArrayList<Pair<String, String>>()
-            var depth = 0
-            var inBacktick = false
-            var start = 0
-            var i = 0
-            while (i <= inner.length) {
-                val atEnd = i == inner.length
-                val c = if (atEnd) ',' else inner[i]
-                if (!atEnd && c == '`') {
-                    inBacktick = !inBacktick
-                } else if (!inBacktick) {
-                    when {
-                        c == '(' -> depth++
-                        c == ')' -> depth--
-                        c == ',' && depth == 0 -> {
-                            val entry = inner.substring(start, i).trim()
-                            start = i + 1
-                            if (entry.isNotEmpty() && !entry.contains('=')
-                                && !entry.startsWith("SKIP")
-                            ) {
-                                val name: String
-                                val type: String
-                                if (entry.startsWith("`")) {
-                                    val close = entry.indexOf('`', 1)
-                                    name = entry.substring(1, close)
-                                    type = entry.substring(close + 1).trim()
-                                } else {
-                                    val sp = entry.indexOf(' ')
-                                    if (sp < 0) {
-                                        i++
-                                        continue
-                                    }
-                                    name = entry.substring(0, sp)
-                                    type = entry.substring(sp + 1).trim()
-                                }
-                                if (type.isNotEmpty()) {
-                                    out.add(Pair(name, type))
-                                }
-                            }
-                        }
-                    }
+            for (raw in DefaultTypeParser.splitTopLevel(inner)) {
+                val entry = raw.trim()
+                if (entry.isEmpty()) {
+                    continue
                 }
-                i++
+                // Parameters (max_dynamic_paths = N, max_dynamic_types = N) are the
+                // only entries with '=' at the TOP level; an Enum type's '=' sits
+                // inside the type's own parentheses (e.g. `status Enum8('ok' = 1)`).
+                if (DefaultTypeParser.indexOfTopLevel(entry, '=') >= 0) {
+                    continue
+                }
+                // `name Type` splits at the first top-level space. An entry without
+                // one (a bare parameter/keyword) is not a typed path.
+                val sp = DefaultTypeParser.indexOfTopLevel(entry, ' ')
+                if (sp < 0) {
+                    continue
+                }
+                val namePart = entry.substring(0, sp)
+                // A skip clause is the SKIP keyword followed by a path or REGEXP
+                // '...'; a path NAME merely starting with the letters SKIP (e.g.
+                // `SKIPPED_AT DateTime`) is a typed path.
+                if (namePart == "SKIP") {
+                    continue
+                }
+                val name =
+                    if (namePart.length >= 2 && namePart.startsWith("`") && namePart.endsWith("`")) {
+                        namePart.substring(1, namePart.length - 1)
+                    } else {
+                        namePart
+                    }
+                val type = entry.substring(sp + 1).trim()
+                if (type.isNotEmpty()) {
+                    out.add(Pair(name, type))
+                }
             }
             out.sortBy { it.first }
             return out

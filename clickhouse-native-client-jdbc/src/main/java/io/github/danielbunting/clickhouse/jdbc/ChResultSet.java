@@ -118,10 +118,7 @@ final class ChResultSet implements ResultSet {
             // max_execution_time abort) from the lazy block pull; per the JDBC contract
             // it must surface as an SQLException, not a raw unchecked ClickHouseException.
             afterLast = true;
-            if (e instanceof io.github.danielbunting.clickhouse.ServerException se) {
-                throw new SQLException(se.getMessage(), null, se.code(), se);
-            }
-            throw new SQLException(e.getMessage(), e);
+            throw ChStatement.wrap(e);
         }
     }
 

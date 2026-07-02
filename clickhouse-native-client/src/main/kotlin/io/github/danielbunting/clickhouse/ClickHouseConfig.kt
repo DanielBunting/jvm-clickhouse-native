@@ -737,9 +737,15 @@ public class ClickHouseConfig private constructor(b: Builder) {
             return if (at >= 0) authority.substring(0, at) else null
         }
 
-        /** Percent-decodes one raw userinfo component (UTF-8). */
+        /**
+         * Percent-decodes one raw URL component per RFC 3986 (UTF-8): only `%XX`
+         * escapes are decoded. A literal `'+'` is ordinary data here — `'+'`-as-space
+         * is form encoding (`application/x-www-form-urlencoded`), which never applies
+         * to URL components — so it is pre-escaped to survive [java.net.URLDecoder]'s
+         * form-decoding verbatim.
+         */
         private fun percentDecode(s: String): String =
-            java.net.URLDecoder.decode(s, Charsets.UTF_8)
+            java.net.URLDecoder.decode(s.replace("+", "%2B"), Charsets.UTF_8)
 
         /** The full raw authority of a `chnative://` URL (userinfo + host list). */
         private fun extractAuthority(url: String): String {

@@ -87,7 +87,7 @@ class ChPreparedStatementTest {
     }
 
     private static ChConnection conn(RecordingCore core) {
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties());
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
     }
 
     // ---- static helpers -----------------------------------------------------

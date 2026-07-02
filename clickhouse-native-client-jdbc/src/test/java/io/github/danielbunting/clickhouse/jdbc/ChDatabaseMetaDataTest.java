@@ -38,7 +38,7 @@ class ChDatabaseMetaDataTest {
     void setUp() {
         Properties info = new Properties();
         info.setProperty("database", "testdb");
-        conn = new ChConnection(new FakeCore(), JDBC_URL, info);
+        conn = new ChConnection(new FakeCore(), JDBC_URL, info, "default");
         meta = new ChDatabaseMetaData(conn);
     }
 

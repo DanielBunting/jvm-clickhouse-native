@@ -111,7 +111,7 @@ class ChPreparedStatementServerParamsTest {
     private static ChConnection serverParamConn(RecordingCore core) {
         Properties info = new Properties();
         info.setProperty("server_side_params", "true");
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info);
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info, "default");
     }
 
     // ---- rewrite helper -----------------------------------------------------

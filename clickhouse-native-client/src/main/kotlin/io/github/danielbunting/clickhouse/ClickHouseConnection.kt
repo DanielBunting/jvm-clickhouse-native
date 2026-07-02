@@ -80,6 +80,62 @@ public interface ClickHouseConnection : AutoCloseable {
         )
     }
 
+    /**
+     * Runs a SELECT with *server-side* [QueryParameters] AND per-query [settings]
+     * (the combination of the two-argument overloads: the bindings travel on the wire
+     * as typed placeholders while the settings override the connection's configured
+     * defaults key-by-key for this query only).
+     *
+     * The default composes the existing overloads when either side is empty, so an
+     * implementation that supports each individually gets the combination for free in
+     * those cases; a genuinely combined call throws [UnsupportedOperationException]
+     * unless overridden (the standard connection and the pooled wrapper override it).
+     *
+     * @param sql      the SELECT statement referencing `{name:Type}` placeholders
+     * @param params   the server-side parameter bindings; may be null/empty
+     * @param settings per-query server settings (insertion order preserved); may be empty
+     * @return a lazy block iterator
+     */
+    public fun query(
+        sql: String,
+        params: QueryParameters?,
+        settings: @JvmSuppressWildcards Map<String, String>,
+    ): QueryResult {
+        if (settings.isEmpty()) {
+            return query(sql, params)
+        }
+        if (params == null || params.isEmpty()) {
+            return query(sql, settings)
+        }
+        throw UnsupportedOperationException(
+            "Combined server-side query parameters and per-query settings are not supported" +
+                " by this connection"
+        )
+    }
+
+    /**
+     * Runs DDL/DML with server-side [QueryParameters] AND per-query [settings], no
+     * result set. Same composition/default semantics as the combined [query] overload.
+     */
+    public fun execute(
+        sql: String,
+        params: QueryParameters?,
+        settings: @JvmSuppressWildcards Map<String, String>,
+    ) {
+        if (settings.isEmpty()) {
+            execute(sql, params)
+            return
+        }
+        if (params == null || params.isEmpty()) {
+            execute(sql, settings)
+            return
+        }
+        throw UnsupportedOperationException(
+            "Combined server-side query parameters and per-query settings are not supported" +
+                " by this connection"
+        )
+    }
+
     /** Runs a scalar query with server-side [QueryParameters]. */
     public fun executeScalar(sql: String, params: QueryParameters?): Long {
         if (params == null || params.isEmpty()) {
@@ -125,7 +181,10 @@ public interface ClickHouseConnection : AutoCloseable {
      * Lightweight liveness probe (reference: the official client's `ping()`): reports
      * whether the server answers on this connection, without running a query. The
      * default implementation falls back to `SELECT 1`; the real connection overrides it
-     * with the protocol-level `Ping`/`Pong` exchange. Never throws.
+     * with the protocol-level `Ping`/`Pong` exchange. Never throws. While another
+     * operation is in flight (e.g. a streaming `QueryResult` holds the connection) the
+     * probe answers `true` without touching the socket: an active stream proves the
+     * connection is alive, and interleaving a `Ping` mid-stream would corrupt it.
      */
     public fun ping(): Boolean {
         return try {

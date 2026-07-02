@@ -71,7 +71,7 @@ public final class ClickHouseDriver implements Driver {
         try {
             ClickHouseConfig config = ClickHouseConfig.fromUrl(coreUrl, info);
             ClickHouseConnection core = ClickHouseConnection.open(config);
-            return new ChConnection(core, url, info);
+            return new ChConnection(core, url, info, config.database());
         } catch (RuntimeException e) {
             throw new SQLException("Failed to connect to ClickHouse via '" + url + "': "
                     + e.getMessage(), e);

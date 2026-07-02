@@ -612,4 +612,29 @@ class JdbcDatabaseMetaDataIT {
                     "a ClickHouse database is modelled as the JDBC catalog");
         }
     }
+
+    /**
+     * {@code DatabaseMetaData.getUserName()} succeeds even while another
+     * {@link ResultSet} on the same connection is mid-stream (tools routinely
+     * interleave metadata calls with an open cursor): while a streaming result holds
+     * the {@code ConnectionGuard}, the method answers from the connection's
+     * configured user instead of probing the busy shared connection. (was knownBug 43)
+     */
+    @Test
+    void getUserNameSucceedsWhileAnotherResultSetIsStreaming() throws Exception {
+        try (Connection conn = connect();
+                Statement st = conn.createStatement();
+                // A lazy multi-block scan: the core QueryResult holds the
+                // ConnectionGuard until the stream is fully drained or closed, so after
+                // reading only the first row the connection is genuinely busy. (Kept to
+                // 10M rows so ResultSet.close()'s drain stays quick.)
+                ResultSet rs = st.executeQuery(
+                        "SELECT number FROM system.numbers LIMIT 10000000")) {
+            assertTrue(rs.next(), "the streaming result must be mid-stream");
+            assertEquals(0L, rs.getLong(1));
+            assertEquals("default", conn.getMetaData().getUserName(),
+                    "getUserName must not need the busy shared connection while a "
+                    + "result set is streaming");
+        }
+    }
 }

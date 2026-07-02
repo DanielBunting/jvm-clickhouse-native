@@ -72,7 +72,7 @@ class ChSqlParsingTest {
     }
 
     private static ChConnection conn(RecordingCore core) {
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties());
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
     }
 
     // ---- ?::type cast adjacency (jdbc-v2 BaseSqlParserFacadeTest#testStmtWithCasts,
@@ -140,6 +140,28 @@ class ChSqlParsingTest {
         assertEquals("select 1 ? 'a' : 'b', 3",
                 ChPreparedStatement.substitute(
                         "select 1 ? 'a' : 'b', ?", new Object[] {null, 3}));
+    }
+
+    /**
+     * A genuine placeholder followed later in the same expression by a real ternary
+     * is still counted. In {@code "SELECT * FROM t WHERE a = ? AND b ? c : d"} the
+     * FIRST {@code ?} is a bindable parameter and only the second one is the ternary
+     * operator ({@code b ? c : d}): the scanner pairs each ternary {@code ':'} with
+     * the NEAREST preceding unpaired {@code ?} at the same depth, so exactly 1
+     * placeholder is counted and {@code setInt(1, ...)} binds it. (was knownBug 37)
+     */
+    @Test
+    void placeholderBeforeLaterTernaryStillCounted() throws SQLException {
+        String sql = "SELECT * FROM t WHERE a = ? AND b ? c : d";
+        assertEquals(1, ChPreparedStatement.countPlaceholders(sql),
+                "only the ternary's '?' is an operator; the first '?' is a parameter");
+        // The binding lands on the first '?' and the ternary stays verbatim.
+        assertEquals("SELECT * FROM t WHERE a = 42 AND b ? c : d",
+                ChPreparedStatement.substitute(sql, new Object[] {null, 42}));
+        // Binding surface: setInt(1, ...) must accept the index instead of throwing
+        // because countPlaceholders reported 0 parameters.
+        ChPreparedStatement ps = new ChPreparedStatement(conn(new RecordingCore()), sql);
+        ps.setInt(1, 42);
     }
 
     // ---- backslash-escaped quote inside a literal ----------------------------

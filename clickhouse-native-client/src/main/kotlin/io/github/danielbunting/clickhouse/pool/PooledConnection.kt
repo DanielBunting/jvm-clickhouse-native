@@ -46,8 +46,16 @@ internal class PooledConnection(
         return delegate.query(sql, params)
     }
 
+    override fun query(sql: String, params: QueryParameters?, settings: Map<String, String>): QueryResult {
+        return delegate.query(sql, params, settings)
+    }
+
     override fun execute(sql: String, params: QueryParameters?) {
         delegate.execute(sql, params)
+    }
+
+    override fun execute(sql: String, params: QueryParameters?, settings: Map<String, String>) {
+        delegate.execute(sql, params, settings)
     }
 
     override fun executeScalar(sql: String, params: QueryParameters?): Long {

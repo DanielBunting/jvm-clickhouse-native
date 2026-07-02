@@ -1,6 +1,7 @@
 package io.github.danielbunting.clickhouse.jdbc.integration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,6 +12,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Tag;
@@ -167,6 +169,43 @@ class JdbcErrorHandlingIT {
             // The actual contract under test — currently 0 (bug).
             assertEquals(81, e.getErrorCode(),
                     "SQLException.getErrorCode() must propagate the server error code");
+        }
+    }
+
+    /**
+     * A {@code max_execution_time} abort (TIMEOUT_EXCEEDED, code 159) arriving
+     * MID-STREAM surfaces from {@link ResultSet#next()} as an
+     * {@link SQLTimeoutException}, exactly as it does when the abort arrives at
+     * {@code executeQuery} time ({@code ChStatement.wrap} maps 159 to
+     * {@code SQLTimeoutException}). (was knownBug 44)
+     *
+     * <p>Shape: sleepEachRow(0.05) x 100 with max_block_size=1 streams the first
+     * 1-row blocks well before the 1s deadline (so executeQuery succeeds), then the
+     * server aborts ~1s in, during iteration.
+     */
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void midStreamTimeoutSurfacesAsSqlTimeoutException() throws Exception {
+        try (Connection conn = connect(); Statement st = conn.createStatement()) {
+            st.setQueryTimeout(1);
+            ResultSet rs = st.executeQuery(
+                    "SELECT number, sleepEachRow(0.05) FROM system.numbers LIMIT 100 "
+                    + "SETTINGS max_block_size = 1");
+            SQLException e = assertThrows(SQLException.class, () -> {
+                while (rs.next()) {
+                    // drain until the server-side abort arrives mid-stream
+                }
+            }, "the 1s timeout must abort the query during iteration");
+            // Sanity: prove the failure really is TIMEOUT_EXCEEDED arriving mid-stream
+            // (i.e. this is the right scenario, not some other error).
+            ServerException server = serverException(e);
+            assertNotNull(server, "sanity: the server abort must be in the cause chain: " + e);
+            assertEquals(159, server.code(),
+                    "sanity: the mid-stream abort is TIMEOUT_EXCEEDED (159): " + e.getMessage());
+            // The contract under test: code 159 maps to SQLTimeoutException mid-stream
+            // too, not only at executeQuery time.
+            assertInstanceOf(SQLTimeoutException.class, e,
+                    "a mid-stream TIMEOUT_EXCEEDED must surface as SQLTimeoutException");
         }
     }
 }

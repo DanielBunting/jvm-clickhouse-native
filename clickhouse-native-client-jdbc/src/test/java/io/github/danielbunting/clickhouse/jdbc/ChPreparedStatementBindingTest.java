@@ -86,7 +86,7 @@ class ChPreparedStatementBindingTest {
     }
 
     private static ChConnection conn(RecordingCore core) {
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties());
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
     }
 
     /** Binds one value through {@code binder} and returns the rendered literal for it. */

@@ -139,6 +139,47 @@ class DynamicTypesIT extends TypeRoundTripBase {
     }
 
     /**
+     * A Dynamic column whose member type is JSON NESTED IN A CONTAINER — here
+     * {@code Array(JSON)} — decodes: the row reads back as a {@code List} whose
+     * single element is the JSON object string {@code {"a":1}} (the server confirms the
+     * member type via {@code dynamicType} = {@code Array(JSON)}, asserted through a
+     * separate plain-String query). Member serialization prefixes are read through the
+     * uniform {@code ColumnCodec.readStatePrefix} recursion — container codecs
+     * (Array/Tuple/Map/Nullable/Variant) delegate to their element codecs, mirroring
+     * ClickHouse ISerialization — so the nested JSON prefix lands before the Dynamic
+     * discriminators exactly as the server writes it. (was knownBug 39)
+     */
+    @Test
+    void dynamicWithArrayOfJsonMemberDecodes() {
+        withTable("dynamic_array_json", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("SET allow_experimental_json_type = 1");
+
+            String dynExpr = "CAST(materialize([materialize('{\"a\":1}')::JSON]), 'Dynamic')";
+
+            // Server-side sanity (plain String result, unaffected by the bug): the
+            // member type really is Array(JSON).
+            List<Object[]> typeRows = decode(conn, "SELECT dynamicType(" + dynExpr + ")");
+            assertEquals("Array(JSON)", typeRows.get(0)[0],
+                    "precondition: the Dynamic member type must be Array(JSON)");
+
+            List<Object[]> rows = decode(conn, "SELECT " + dynExpr + " AS d");
+            assertEquals(1, rows.size());
+            Object v = rows.get(0)[0];
+            assertInstanceOf(List.class, v,
+                    "Array(JSON) inside Dynamic should decode to a List, was "
+                            + (v == null ? "null" : v.getClass().getName()));
+            List<?> list = (List<?>) v;
+            assertEquals(1, list.size());
+            assertInstanceOf(String.class, list.get(0),
+                    "JSON element should decode to its object String");
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    ((String) list.get(0)).contains("\"a\":1"),
+                    "element must carry a:1, was " + list.get(0));
+        });
+    }
+
+    /**
      * ENCODE inference: temporals, UUID, wide integers, arrays and maps all infer a
      * concrete ClickHouse type and round-trip through the flattened Dynamic write path.
      */

@@ -352,10 +352,16 @@ internal constructor(
                     ServerPacket.PROFILE_EVENTS -> {
                         // Trailing informational/echo packets; keep draining.
                     }
-                    else ->
+                    else -> {
+                        // The terminating empty block is already on the wire and an
+                        // unknown packet was consumed: the wire position is lost, so
+                        // close() must not send a second terminator and a pool must
+                        // discard this connection.
+                        client.markPoisoned()
                         throw ProtocolException(
                             "Unexpected packet while completing INSERT: " + msg.type()
                         )
+                    }
                 }
             }
         } finally {

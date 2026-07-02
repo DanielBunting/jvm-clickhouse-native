@@ -305,7 +305,7 @@ class ChStatementTest {
     }
 
     private static ChStatement connected(RecordingCore core) {
-        ChConnection c = new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties());
+        ChConnection c = new ChConnection(core, "jdbc:chnative://localhost:9000/default", new Properties(), "default");
         return new ChStatement(c);
     }
 

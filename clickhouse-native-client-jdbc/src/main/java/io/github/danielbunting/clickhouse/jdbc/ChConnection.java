@@ -61,11 +61,15 @@ public final class ChConnection implements Connection {
     /**
      * Wraps an already-opened core connection.
      *
-     * @param core the live native ClickHouse connection; must not be {@code null}
-     * @param url  the original JDBC URL the driver was given (for diagnostics)
-     * @param info the connection properties supplied to the driver; may be {@code null}
+     * @param core     the live native ClickHouse connection; must not be {@code null}
+     * @param url      the original JDBC URL the driver was given (for diagnostics)
+     * @param info     the connection properties supplied to the driver; may be {@code null}
+     * @param database the database the core session was opened against, as resolved by
+     *                 the caller ({@code ClickHouseDriver} passes
+     *                 {@code ClickHouseConfig.database()}, the single URL parse the core
+     *                 session itself uses); may be {@code null}
      */
-    public ChConnection(ClickHouseConnection core, String url, Properties info) {
+    public ChConnection(ClickHouseConnection core, String url, Properties info, String database) {
         if (core == null) {
             throw new NullPointerException("core connection must not be null");
         }
@@ -73,38 +77,14 @@ public final class ChConnection implements Connection {
         this.url = url;
         this.info = info != null ? info : new Properties();
         // Derive the default catalog/schema from the "database" property, falling
-        // back to the database in the JDBC URL path when the property is absent.
+        // back to the caller-resolved database when the property is absent — so the
+        // JDBC catalog always names the database the core session connects to.
         String db = this.info.getProperty("database");
         if (db == null) {
-            db = databaseFromUrl(url);
+            db = database;
         }
         this.catalog = db;
         this.schema = db;
-    }
-
-    /**
-     * Extracts the database from a {@code jdbc:chnative://host[:port]/db[?...]} URL
-     * path, or {@code null} when the URL carries no (or an empty) path. Percent
-     * escapes in the path segment are decoded.
-     */
-    private static String databaseFromUrl(String url) {
-        if (url == null) {
-            return null;
-        }
-        int authorityStart = url.indexOf("://");
-        if (authorityStart < 0) {
-            return null;
-        }
-        int pathStart = url.indexOf('/', authorityStart + 3);
-        if (pathStart < 0) {
-            return null;
-        }
-        int end = url.indexOf('?', pathStart);
-        String db = url.substring(pathStart + 1, end < 0 ? url.length() : end);
-        if (db.isEmpty()) {
-            return null;
-        }
-        return java.net.URLDecoder.decode(db, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
@@ -120,6 +100,28 @@ public final class ChConnection implements Connection {
     /** Returns the original JDBC URL this connection was opened with. */
     String url() {
         return url;
+    }
+
+    /**
+     * Returns the user this connection was configured to authenticate as, resolved
+     * exactly as the driver resolved credentials at connect time ({@code info}
+     * properties override URL userinfo; defaults to {@code "default"}). Answered
+     * from local state only — never touches the server, so it is safe to call while
+     * the shared core connection is busy streaming.
+     */
+    String configuredUser() {
+        String coreUrl = url != null && url.startsWith("jdbc:")
+                ? url.substring("jdbc:".length())
+                : url;
+        try {
+            return io.github.danielbunting.clickhouse.ClickHouseConfig
+                    .fromUrl(coreUrl, info).username();
+        } catch (RuntimeException e) {
+            // An unparseable URL (possible for hand-constructed connections in tests):
+            // the info properties are the only remaining local source of truth.
+            String user = info.getProperty("user");
+            return user != null ? user : info.getProperty("username");
+        }
     }
 
     /**

@@ -128,6 +128,70 @@ class JsonTypesIT extends TypeRoundTripBase {
      * declarations from the column type string and decodes each through its own codec.
      * The reconstructed object carries the typed path under its dotted key.
      */
+    /**
+     * A typed path whose declared TYPE contains {@code '='} — e.g.
+     * {@code JSON(status Enum8('ok' = 1, 'err' = 2))} — round-trips on a whole-column
+     * read: the server serializes the typed path as its declared type at its fixed wire
+     * position, so the decoded object carries {@code "status":"ok"}. Only an {@code '='}
+     * at the top level of a {@code JSON(...)} argument marks a
+     * {@code max_dynamic_* = N} parameter; the Enum's {@code '='} is nested inside the
+     * type's own parentheses and is part of the type. (was knownBug 38)
+     */
+    @Test
+    void typedPathWithEnumTypeRoundTrips() {
+        withTable("json_typed_enum", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(status Enum8('ok' = 1, 'err' = 2)))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"status\":\"ok\",\"note\":\"x\"}'),"
+                    + " (2, '{\"status\":\"err\"}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table + " ORDER BY id");
+            assertEquals(2, rows.size());
+
+            String s0 = (String) rows.get(0)[0];
+            assertTrue(s0.contains("\"status\":\"ok\""),
+                    "Enum-typed path must decode through its declared Enum8, was " + s0);
+            assertTrue(s0.contains("\"note\":\"x\""),
+                    "dynamic path must survive alongside the typed one, was " + s0);
+
+            String s1 = (String) rows.get(1)[0];
+            assertTrue(s1.contains("\"status\":\"err\""),
+                    "row 2 Enum-typed path must be err, was " + s1);
+        });
+    }
+
+    /**
+     * A typed path whose NAME merely starts with the letters {@code SKIP} — e.g.
+     * {@code JSON(SKIPPED_AT DateTime)}, which the server accepts (verified against
+     * 25.8) — round-trips on a whole-column read. Only the {@code SKIP} KEYWORD
+     * followed by a path/regexp is a skip clause; an identifier that happens to start
+     * with "SKIP" is a typed path. (was knownBug 38)
+     */
+    @Test
+    void typedPathNamedLikeSkipKeywordRoundTrips() {
+        withTable("json_typed_skipname", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(SKIPPED_AT DateTime))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"SKIPPED_AT\":\"2021-03-04 15:06:27\",\"c\":1}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table);
+            assertEquals(1, rows.size());
+            String j = (String) rows.get(0)[0];
+            assertTrue(j.contains("\"SKIPPED_AT\""),
+                    "SKIP-prefixed typed path must be present, was " + j);
+            assertTrue(j.contains("2021-03-04"),
+                    "SKIPPED_AT must carry the inserted DateTime, was " + j);
+            assertTrue(j.contains("\"c\":1"),
+                    "dynamic path must survive alongside the typed one, was " + j);
+        });
+    }
+
     @Test
     void wholeColumnReadOfTypedPathJsonDecodes() {
         withTable("json_typed_whole", (conn, table) -> {

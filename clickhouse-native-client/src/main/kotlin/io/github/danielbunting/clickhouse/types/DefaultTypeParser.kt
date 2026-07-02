@@ -411,22 +411,27 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
 
         /**
          * Splits a comma-separated argument list at the top level only — commas nested
-         * inside parentheses or single-quoted strings are ignored.
+         * inside parentheses, single-quoted strings, or backtick-quoted identifiers
+         * are ignored. Internal (not private) so `JsonColumnCodec` can reuse it for
+         * `JSON(...)` typed-path declarations.
          */
-        private fun splitTopLevel(args: String): Array<String> {
+        internal fun splitTopLevel(args: String): Array<String> {
             val parts = ArrayList<String>()
             var depth = 0
             var inQuote = false
+            var inBacktick = false
             val cur = StringBuilder()
             var i = 0
             while (i < args.length) {
                 val c = args[i]
-                if (inQuote) {
+                if (inQuote || inBacktick) {
                     cur.append(c)
                     if (c == '\\' && i + 1 < args.length) {
                         cur.append(args[++i])
-                    } else if (c == '\'') {
+                    } else if (inQuote && c == '\'') {
                         inQuote = false
+                    } else if (inBacktick && c == '`') {
+                        inBacktick = false
                     }
                     i++
                     continue
@@ -434,6 +439,10 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
                 when (c) {
                     '\'' -> {
                         inQuote = true
+                        cur.append(c)
+                    }
+                    '`' -> {
+                        inBacktick = true
                         cur.append(c)
                     }
                     '(' -> {
@@ -470,40 +479,54 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
          * is the type (covers types whose own parentheses contain spaces).
          */
         private fun splitFieldName(arg: String): Array<String?> {
+            val sp = indexOfTopLevel(arg, ' ')
+            if (sp >= 0) {
+                val first = arg.substring(0, sp)
+                if (isIdentifier(first)) {
+                    return arrayOf<String?>(first, arg.substring(sp + 1).trim())
+                }
+                // First token is not a plain identifier -> no field name.
+            }
+            return arrayOf<String?>(null, arg)
+        }
+
+        /**
+         * Index of the first occurrence of [target] at the top level of [arg] —
+         * outside parentheses, single-quoted strings, and backtick-quoted
+         * identifiers — or -1 if there is none. Internal (not private) so
+         * `JsonColumnCodec` can reuse it for `JSON(...)` typed-path declarations.
+         */
+        internal fun indexOfTopLevel(arg: String, target: Char): Int {
             var depth = 0
             var inQuote = false
+            var inBacktick = false
             var i = 0
             while (i < arg.length) {
                 val c = arg[i]
-                if (inQuote) {
+                if (inQuote || inBacktick) {
                     if (c == '\\') {
                         i++
-                    } else if (c == '\'') {
+                    } else if (inQuote && c == '\'') {
                         inQuote = false
+                    } else if (inBacktick && c == '`') {
+                        inBacktick = false
                     }
                     i++
                     continue
                 }
                 when (c) {
                     '\'' -> inQuote = true
+                    '`' -> inBacktick = true
                     '(' -> depth++
                     ')' -> depth--
-                    ' ' ->
-                        if (depth == 0) {
-                            val first = arg.substring(0, i)
-                            if (isIdentifier(first)) {
-                                return arrayOf<String?>(first, arg.substring(i + 1).trim())
-                            }
-                            // First token is not a plain identifier -> no field name.
-                            return arrayOf<String?>(null, arg)
+                    else ->
+                        if (c == target && depth == 0) {
+                            return i
                         }
-                    else -> {
-                        // keep scanning
-                    }
                 }
                 i++
             }
-            return arrayOf<String?>(null, arg)
+            return -1
         }
 
         /** True if [s] is a plain identifier (non-digit start, then word chars). */

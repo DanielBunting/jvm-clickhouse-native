@@ -92,6 +92,24 @@ public constructor(variants: Array<ColumnCodec<*>>?) : ColumnCodec<Array<Any?>> 
     }
 
     @Throws(IOException::class)
+    override fun readStatePrefix(`in`: BinaryReader) {
+        // The Variant itself carries no state prefix (its discriminators version is
+        // inline in the body), but each member's prefix appears here, recursively —
+        // e.g. a LowCardinality or JSON member contributes its own prefix bytes.
+        for (i in variants.indices) {
+            variants[i].readStatePrefix(`in`)
+        }
+    }
+
+    @Throws(IOException::class)
+    override fun writeStatePrefix(out: BinaryWriter) {
+        // Mirror of readStatePrefix: recurse the member prefixes in member order.
+        for (i in variants.indices) {
+            variants[i].writeStatePrefix(out)
+        }
+    }
+
+    @Throws(IOException::class)
     @Suppress("UNCHECKED_CAST")
     override fun read(`in`: BinaryReader, rowCount: Int, dest: Array<Any?>) {
         if (rowCount == 0) {

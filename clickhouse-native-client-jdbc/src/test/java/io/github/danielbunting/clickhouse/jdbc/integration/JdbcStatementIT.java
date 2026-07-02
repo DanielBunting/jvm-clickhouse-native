@@ -919,4 +919,40 @@ class JdbcStatementIT {
             return rs.getString(1);
         }
     }
+
+    // ------------------------------------------------------------------
+    // closeOnCompletion with a superseded result set (knownBug 42)
+    // ------------------------------------------------------------------
+
+    /**
+     * With {@link Statement#closeOnCompletion()} requested, the statement closes only
+     * when ALL of its dependent result sets are closed (JDBC 4.1,
+     * {@code Statement.closeOnCompletion}: "when all of its dependent result sets are
+     * closed"). Re-executing implicitly closes the superseded result set, and closing
+     * that stale result set again while the CURRENT result set is still open leaves
+     * the statement open and the current result set usable. (was knownBug 42)
+     */
+    @Test
+    void closingSupersededResultSetDoesNotCloseStatement() throws Exception {
+        try (Connection conn = connect(); Statement st = conn.createStatement()) {
+            st.closeOnCompletion();
+            ResultSet rs1 = st.executeQuery("SELECT 1");
+            // Drain rs1 fully (releasing the single-operation connection for the next
+            // query) but deliberately leave it OPEN.
+            assertTrue(rs1.next());
+            assertFalse(rs1.next());
+
+            ResultSet rs2 = st.executeQuery("SELECT 2");
+            rs1.close();
+            assertFalse(st.isClosed(),
+                    "closing a superseded result set must not close the statement while "
+                    + "the current result set is still open");
+            assertTrue(rs2.next(), "the current result set must remain usable");
+            assertEquals(2, rs2.getInt(1));
+
+            rs2.close();
+            assertTrue(st.isClosed(),
+                    "the statement closes once its last result set closes");
+        }
+    }
 }

@@ -159,7 +159,7 @@ public class ChStatement implements Statement {
      *
      * @return the settings map, or {@code null} when no statement setting applies
      */
-    private java.util.Map<String, String> perQuerySettings() {
+    protected java.util.Map<String, String> perQuerySettings() {
         if (queryTimeoutSeconds > 0) {
             return java.util.Map.of("max_execution_time", String.valueOf(queryTimeoutSeconds));
         }
@@ -178,6 +178,7 @@ public class ChStatement implements Statement {
      */
     ResultSet executeQueryInternal(String sql) throws SQLException {
         checkOpen();
+        closeSupersededResultSet();
         try {
             currentUpdateCount = -1;
             java.util.Map<String, String> settings = perQuerySettings();
@@ -190,6 +191,20 @@ public class ChStatement implements Statement {
         }
     }
 
+    /**
+     * Implicitly closes the previous result set before a new execution, per the JDBC
+     * contract that re-executing a statement releases its prior dependent result. The
+     * field is detached BEFORE closing so {@link #resultSetClosed} sees a non-current
+     * result set and {@code closeOnCompletion} cannot fire mid-execute.
+     */
+    protected void closeSupersededResultSet() {
+        ChResultSet old = currentResultSet;
+        if (old != null) {
+            currentResultSet = null;
+            old.close();
+        }
+    }
+
     @Override
     public int executeUpdate(String sql) throws SQLException {
         return executeUpdateInternal(sql);
@@ -198,6 +213,7 @@ public class ChStatement implements Statement {
     /** The real update path; see {@link #executeQueryInternal(String)} for why it exists. */
     int executeUpdateInternal(String sql) throws SQLException {
         checkOpen();
+        closeSupersededResultSet();
         try {
             java.util.Map<String, String> settings = perQuerySettings();
             if (settings == null) {
@@ -205,7 +221,6 @@ public class ChStatement implements Statement {
             } else {
                 conn.core().execute(sql, settings);
             }
-            currentResultSet = null;
             currentUpdateCount = 0;
             return 0;
         } catch (ClickHouseException e) {
@@ -456,8 +471,13 @@ public class ChStatement implements Statement {
      * Callback from {@link ChResultSet#close()}: when {@link #closeOnCompletion()} was
      * requested, the statement closes together with its dependent result set. The
      * result set is already closed at this point, so only the statement state flips.
+     * Only the CURRENT result set is a dependent one — a superseded (already detached)
+     * result set closing must not affect the statement.
      */
     void resultSetClosed(ChResultSet rs) {
+        if (rs != currentResultSet) {
+            return;
+        }
         if (closeOnCompletion && !closed) {
             closed = true;
             currentResultSet = null;

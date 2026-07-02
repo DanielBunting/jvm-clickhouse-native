@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.danielbunting.clickhouse.BulkInserter;
+import io.github.danielbunting.clickhouse.ClickHouseConfig;
 import io.github.danielbunting.clickhouse.ClickHouseConnection;
 import io.github.danielbunting.clickhouse.QueryResult;
 import java.sql.Connection;
@@ -31,7 +32,15 @@ class ChConnectionTest {
     private ChConnection newConnection(FakeCore core) {
         Properties info = new Properties();
         info.setProperty("database", "default");
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info);
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info, "default");
+    }
+
+    /**
+     * Resolves the database the driver would pass into {@link ChConnection}: the
+     * config-derived database from the same single URL parse the core session uses.
+     */
+    private static String configDatabase(String jdbcUrl, Properties info) {
+        return ClickHouseConfig.fromUrl(jdbcUrl.substring("jdbc:".length()), info).database();
     }
 
     // ------------------------------------------------------------------
@@ -55,15 +64,50 @@ class ChConnectionTest {
     /**
      * A connection opened with a database in the JDBC URL path but no
      * {@code database} property still reports that database as its catalog and
-     * schema: the constructor falls back to the URL path when the property is absent
-     * (was knownBug 24; jdbc-v2 derives them from the parsed URL).
+     * schema: the driver resolves the database via {@code ClickHouseConfig} and the
+     * constructor falls back to that caller-resolved value when the property is
+     * absent (was knownBug 24; jdbc-v2 derives them from the parsed URL).
      */
     @Test
     void catalogAndSchemaFallBackToDatabaseFromUrlPath() throws SQLException {
+        String url = "jdbc:chnative://localhost:9000/mydb";
         ChConnection conn = new ChConnection(
-                new FakeCore(), "jdbc:chnative://localhost:9000/mydb", new Properties());
+                new FakeCore(), url, new Properties(), configDatabase(url, new Properties()));
         assertEquals("mydb", conn.getCatalog(), "catalog must come from the URL path");
         assertEquals("mydb", conn.getSchema(), "schema must come from the URL path");
+    }
+
+    /**
+     * A literal {@code '+'} in the JDBC URL database path segment is preserved:
+     * catalog and schema come from the config-derived database — the same database
+     * name the core session connects to — and RFC 3986 path decoding only decodes
+     * {@code %XX} escapes ({@code '+'}-as-space is form encoding, which does not
+     * apply to the path). (was knownBug 36)
+     */
+    @Test
+    void plusInUrlDatabasePathPreserved() throws SQLException {
+        String url = "jdbc:chnative://host:9000/my+db";
+        ChConnection conn = new ChConnection(
+                new FakeCore(), url, new Properties(), configDatabase(url, new Properties()));
+        assertEquals("my+db", conn.getCatalog(),
+                "a literal '+' in the database path is data, not a form-encoded space");
+        assertEquals("my+db", conn.getSchema());
+    }
+
+    /**
+     * A JDBC URL with NO path but a query string whose parameter value contains
+     * {@code '/'} never has that query string mistaken for a database path: the
+     * database is the config-derived one (the {@code "default"} config default for a
+     * pathless URL), not a fragment of the query-parameter value. (was knownBug 36)
+     */
+    @Test
+    void queryStringNeverMistakenForDatabasePath() throws SQLException {
+        String url = "jdbc:chnative://host:9000?settings.custom_ca=/etc/ca.pem";
+        ChConnection conn = new ChConnection(
+                new FakeCore(), url, new Properties(), configDatabase(url, new Properties()));
+        assertEquals("default", conn.getCatalog(),
+                "a slash inside a query-parameter value is not a database path");
+        assertEquals("default", conn.getSchema());
     }
 
     // ------------------------------------------------------------------
@@ -312,7 +356,7 @@ class ChConnectionTest {
 
     @Test
     void nullInfoDoesNotThrow() throws SQLException {
-        ChConnection conn = new ChConnection(new FakeCore(), "jdbc:chnative://h:9000/", null);
+        ChConnection conn = new ChConnection(new FakeCore(), "jdbc:chnative://h:9000/", null, null);
         assertTrue(conn.getAutoCommit());
         assertNull(conn.getCatalog());
     }
