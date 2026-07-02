@@ -144,4 +144,66 @@ class AdbcParamsTest {
         AdbcException ex = assertThrows(AdbcException.class, () -> AdbcParams.toConfig(params));
         assertEquals(AdbcStatusCode.INVALID_ARGUMENT, ex.getStatus());
     }
+
+    @Test
+    @DisplayName("URI user-info credentials are parsed when no credential options are given")
+    void uriCredentialsParsedFromUserInfo() {
+        Map<String, Object> params = new HashMap<>();
+        AdbcDriver.PARAM_URI.set(params, "chnative://alice:s3cret@myhost:9001/mydb");
+
+        ClickHouseConfig config = AdbcParams.toConfig(params);
+        assertEquals("alice", config.username());
+        assertEquals("s3cret", config.password());
+    }
+
+    @Test
+    @DisplayName("a password option alone overrides only the password; the URI username stays")
+    void passwordOptionAloneOverridesOnlyPassword() {
+        Map<String, Object> params = new HashMap<>();
+        AdbcDriver.PARAM_URI.set(params, "chnative://alice:s3cret@myhost:9001");
+        AdbcDriver.PARAM_PASSWORD.set(params, "rotated");
+
+        ClickHouseConfig config = AdbcParams.toConfig(params);
+        assertEquals("alice", config.username());
+        assertEquals("rotated", config.password());
+    }
+
+    @Test
+    @DisplayName("URI query options (e.g. connectTimeout) flow onto the config")
+    void uriQueryOptionsApplied() {
+        Map<String, Object> params = new HashMap<>();
+        AdbcDriver.PARAM_URI.set(params, "chnative://myhost:9001/mydb?connectTimeout=7");
+
+        assertEquals(java.time.Duration.ofSeconds(7), AdbcParams.toConfig(params).connectTimeout());
+    }
+
+    @Test
+    @DisplayName("a URI without an explicit port uses the native default")
+    void uriDefaultPortApplied() {
+        Map<String, Object> params = new HashMap<>();
+        AdbcDriver.PARAM_URI.set(params, "chnative://myhost/mydb");
+
+        assertEquals(9000, AdbcParams.toConfig(params).port());
+    }
+
+    @Test
+    @DisplayName("an unknown URI query parameter raises INVALID_ARGUMENT (fail fast, not silently ignore)")
+    void unknownUriQueryParamIsInvalidArgument() {
+        Map<String, Object> params = new HashMap<>();
+        AdbcDriver.PARAM_URI.set(params, "chnative://myhost:9001/mydb?bogusParam=1");
+
+        AdbcException ex = assertThrows(AdbcException.class, () -> AdbcParams.toConfig(params));
+        assertEquals(AdbcStatusCode.INVALID_ARGUMENT, ex.getStatus());
+        assertNotNull(ex.getCause(), "the underlying config failure should be retained as the cause");
+    }
+
+    @Test
+    @DisplayName("a boxed Long port is accepted via the Number arm")
+    void longPortIsAccepted() {
+        Map<String, Object> params = new HashMap<>();
+        params.put(AdbcParams.PARAM_HOST, "localhost");
+        params.put(AdbcParams.PARAM_PORT, 9001L);
+
+        assertEquals(9001, AdbcParams.toConfig(params).port());
+    }
 }

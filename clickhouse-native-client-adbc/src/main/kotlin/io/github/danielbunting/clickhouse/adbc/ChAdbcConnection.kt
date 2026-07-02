@@ -30,20 +30,25 @@ public class ChAdbcConnection internal constructor(
     private val connectionAllocator: BufferAllocator,
 ) : AdbcConnection {
 
-    override fun createStatement(): AdbcStatement =
-        ChAdbcStatement(connection, connectionAllocator)
+    override fun createStatement(): AdbcStatement {
+        checkOpen()
+        return ChAdbcStatement(connection, connectionAllocator)
+    }
 
     override fun bulkIngest(targetTableName: String, mode: BulkIngestMode): AdbcStatement {
+        checkOpen()
         val statement = ChAdbcStatement(connection, connectionAllocator)
         statement.configureIngest(targetTableName, mode)
         return statement
     }
 
     override fun cancel() {
+        checkOpen()
         connection.cancel()
     }
 
     override fun getTableSchema(catalog: String?, dbSchema: String?, tableName: String?): Schema {
+        checkOpen()
         val table = tableName
             ?: throw AdbcErrors.invalidArgument("getTableSchema requires a table name")
         val database = dbSchema?.let { "'" + escape(it) + "'" } ?: "currentDatabase()"
@@ -83,6 +88,7 @@ public class ChAdbcConnection internal constructor(
         tableTypes: Array<String>?,
         columnNamePattern: String?,
     ): ArrowReader {
+        checkOpen()
         return simpleReader(StandardSchemas.GET_OBJECTS_SCHEMA) { root ->
             try {
                 GetObjectsBuilder.build(
@@ -96,6 +102,7 @@ public class ChAdbcConnection internal constructor(
     }
 
     override fun getTableTypes(): ArrowReader {
+        checkOpen()
         return simpleReader(StandardSchemas.TABLE_TYPES_SCHEMA) { root ->
             val types = listOf("TABLE", "VIEW")
             val vector = root.getVector("table_type") as VarCharVector
@@ -106,6 +113,7 @@ public class ChAdbcConnection internal constructor(
     }
 
     override fun getInfo(infoCodes: IntArray?): ArrowReader {
+        checkOpen()
         val version = try {
             connection.query("SELECT version()").use { result ->
                 val blocks = result.blocks()
@@ -179,6 +187,12 @@ public class ChAdbcConnection internal constructor(
     }
 
     private var closed = false
+
+    private fun checkOpen() {
+        if (closed) {
+            throw AdbcErrors.invalidState("Connection is closed")
+        }
+    }
 
     override fun close() {
         if (closed) {

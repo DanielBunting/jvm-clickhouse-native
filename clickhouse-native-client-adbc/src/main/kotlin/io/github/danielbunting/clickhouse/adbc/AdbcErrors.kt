@@ -1,5 +1,6 @@
 package io.github.danielbunting.clickhouse.adbc
 
+import io.github.danielbunting.clickhouse.ServerException
 import io.github.danielbunting.clickhouse.UnsupportedTypeException
 import org.apache.arrow.adbc.core.AdbcException
 import org.apache.arrow.adbc.core.AdbcStatusCode
@@ -7,9 +8,25 @@ import org.apache.arrow.adbc.core.AdbcStatusCode
 /** Small helpers for mapping core failures onto [AdbcException] status codes. */
 internal object AdbcErrors {
 
-    /** Wraps an I/O / protocol failure as an [AdbcStatusCode.IO] error. */
+    /**
+     * Wraps an I/O / protocol failure as an [AdbcStatusCode.IO] error. When a
+     * [ServerException] is in the cause chain, its ClickHouse error code becomes the
+     * [AdbcException.vendorCode] (the analogue of JDBC's `SQLException.getErrorCode()`).
+     */
     fun io(message: String, cause: Throwable? = null): AdbcException =
-        AdbcException.io(message).let { if (cause != null) it.withCause(cause) else it }
+        AdbcException(message, cause, AdbcStatusCode.IO, null, serverErrorCode(cause))
+
+    /** The ClickHouse numeric error code of the nearest [ServerException] in the chain, else 0. */
+    private fun serverErrorCode(cause: Throwable?): Int {
+        var t = cause
+        while (t != null) {
+            if (t is ServerException) {
+                return t.code()
+            }
+            t = t.cause
+        }
+        return 0
+    }
 
     /** A cancellation surfaced as [AdbcStatusCode.CANCELLED]. */
     fun cancelled(message: String, cause: Throwable? = null): AdbcException =

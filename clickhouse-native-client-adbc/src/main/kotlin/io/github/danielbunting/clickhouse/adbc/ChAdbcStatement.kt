@@ -23,6 +23,13 @@ public class ChAdbcStatement internal constructor(
     private var boundRoot: VectorSchemaRoot? = null
     private var ingestTargetTable: String? = null
     private var ingestMode: BulkIngestMode? = null
+    private var closed = false
+
+    private fun checkOpen() {
+        if (closed) {
+            throw AdbcErrors.invalidState("Statement is closed")
+        }
+    }
 
     internal fun configureIngest(targetTable: String, mode: BulkIngestMode) {
         this.ingestTargetTable = targetTable
@@ -43,6 +50,7 @@ public class ChAdbcStatement internal constructor(
     }
 
     override fun executeQuery(): AdbcStatement.QueryResult {
+        checkOpen()
         val sql = sqlQuery
             ?: throw AdbcErrors.invalidState("setSqlQuery(...) must be called before executeQuery()")
         val result = try {
@@ -72,6 +80,7 @@ public class ChAdbcStatement internal constructor(
     }
 
     override fun executeUpdate(): AdbcStatement.UpdateResult {
+        checkOpen()
         val target = ingestTargetTable
         if (target != null) {
             val root = boundRoot
@@ -96,6 +105,7 @@ public class ChAdbcStatement internal constructor(
 
     override fun close() {
         // Readers own their own allocators; bound roots are owned by the caller. Nothing
-        // statement-scoped to free here.
+        // statement-scoped to free here — the flag only arms the closed-state guards.
+        closed = true
     }
 }
