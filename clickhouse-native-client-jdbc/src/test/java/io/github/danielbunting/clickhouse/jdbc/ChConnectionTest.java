@@ -167,6 +167,64 @@ class ChConnectionTest {
                 instanceof ChPreparedStatement);
     }
 
+    /** The two-argument (type, concurrency) overload accepts forward/read-only like the others. */
+    @Test
+    void prepareStatementForwardReadOnlyTwoArgOverloadIsAccepted() throws SQLException {
+        ChConnection conn = newConnection(new FakeCore());
+        assertTrue(conn.prepareStatement("SELECT 1", ResultSet.TYPE_FORWARD_ONLY,
+                ResultSet.CONCUR_READ_ONLY) instanceof ChPreparedStatement);
+    }
+
+    // ------------------------------------------------------------------
+    // configuredUser (backs DatabaseMetaData.getUserName's busy-connection fallback)
+    // ------------------------------------------------------------------
+
+    /**
+     * {@code configuredUser()} resolves credentials exactly as the driver did at
+     * connect time: URL userinfo, overridden by the {@code user} property.
+     */
+    @Test
+    void configuredUserResolvesFromUrlAndProperties() {
+        ChConnection fromUrl = new ChConnection(new FakeCore(),
+                "jdbc:chnative://alice@localhost:9000/db", new Properties(), "db");
+        assertEquals("alice", fromUrl.configuredUser());
+
+        Properties info = new Properties();
+        info.setProperty("user", "bob");
+        ChConnection overridden = new ChConnection(new FakeCore(),
+                "jdbc:chnative://alice@localhost:9000/db", info, "db");
+        assertEquals("bob", overridden.configuredUser(), "the user property overrides URL userinfo");
+
+        // A hand-constructed connection whose URL lacks the jdbc: prefix still parses.
+        ChConnection bareUrl = new ChConnection(new FakeCore(),
+                "chnative://carol@localhost:9000/db", new Properties(), "db");
+        assertEquals("carol", bareUrl.configuredUser());
+    }
+
+    /**
+     * With an unparseable (or absent) URL — possible for hand-constructed connections
+     * in tests — the info properties are the only remaining local source of truth:
+     * {@code user} wins, then {@code username}, then {@code null}.
+     */
+    @Test
+    void configuredUserFallsBackToPropertiesWhenUrlUnparseable() {
+        Properties userProp = new Properties();
+        userProp.setProperty("user", "alice");
+        assertEquals("alice",
+                new ChConnection(new FakeCore(), null, userProp, null).configuredUser(),
+                "null URL: the user property is the answer");
+
+        Properties usernameProp = new Properties();
+        usernameProp.setProperty("username", "bob");
+        assertEquals("bob",
+                new ChConnection(new FakeCore(), "garbage", usernameProp, null).configuredUser(),
+                "unparseable URL: the username alias is honored");
+
+        assertNull(new ChConnection(new FakeCore(), "garbage", new Properties(), null)
+                        .configuredUser(),
+                "no URL and no properties leaves the user unknown");
+    }
+
     @Test
     void prepareStatementGeneratedKeysOverloadsAreLenient() throws SQLException {
         // DEVIATION from jdbc-v2 (ConnectionTest#testCreateUnsupportedStatements throws

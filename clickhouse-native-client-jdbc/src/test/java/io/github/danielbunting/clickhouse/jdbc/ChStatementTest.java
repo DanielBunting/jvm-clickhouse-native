@@ -200,6 +200,35 @@ class ChStatementTest {
         assertFalse(ChStatement.producesResultSet("/* SELECT */ INSERT INTO t VALUES (1)"));
     }
 
+    /**
+     * Lookalike prefixes are NOT comments: a lone {@code -} or {@code /} (including at
+     * the very end of the text) is real SQL text, so classification stops there instead
+     * of swallowing the rest as a comment.
+     */
+    @Test
+    void producesResultSet_commentLookalikePrefixesAreNotComments() {
+        assertFalse(ChStatement.producesResultSet("- SELECT 1"), "single dash is not a -- comment");
+        assertFalse(ChStatement.producesResultSet("-"), "dash at end of text");
+        assertFalse(ChStatement.producesResultSet("/ SELECT 1"), "slash alone is not /*");
+        assertFalse(ChStatement.producesResultSet("/"), "slash at end of text");
+    }
+
+    /**
+     * Block-comment scanning edges: {@code /} and {@code *} characters INSIDE a block
+     * comment that do not open/close anything are plain comment text, and a comment
+     * cut off mid-token (slash-star-slash, or a trailing {@code *}) is unterminated —
+     * never a query.
+     */
+    @Test
+    void producesResultSet_blockCommentEdgeTokens() {
+        assertTrue(ChStatement.producesResultSet("/* a/b **c */ SELECT 1"),
+                "stray '/' and '*' inside a comment are text");
+        assertFalse(ChStatement.producesResultSet("/*/"),
+                "'/*/' is an unterminated comment, not open+close");
+        assertFalse(ChStatement.producesResultSet("/* *"),
+                "trailing '*' does not close the comment");
+    }
+
     @Test
     void generatedKeysOverloadsAreUnsupported() {
         ChStatement s = stmt();

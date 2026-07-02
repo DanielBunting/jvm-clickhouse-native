@@ -2,6 +2,7 @@ package io.github.danielbunting.clickhouse.internal;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -172,5 +173,105 @@ class BulkInserterCloseAfterDesyncTest {
                 () -> assertTrue(client.poisoned,
                         "the desynced connection must be poisoned so pools discard it "
                                 + "instead of recycling an out-of-sync wire"));
+    }
+
+    /**
+     * Abandoning an initialized-but-uncompleted INSERT via {@code close()} terminates
+     * it gracefully: buffered-but-unflushed rows are DISCARDED (abandonment must not
+     * commit surprise data), the terminating empty block is sent, and the response is
+     * drained through EVERY tolerated trailing packet kind (data/totals/extremes
+     * echoes plus the informational progress/profile/log family) to
+     * {@code END_OF_STREAM} — leaving the connection healthy (NOT poisoned) and
+     * reusable by a pool.
+     */
+    @Test
+    void closeWithoutCompleteTerminatesInsertGracefully() {
+        ScriptedClient client = new ScriptedClient();
+        // init(): the INSERT sample/header block.
+        client.script.add(ServerMessage.data(sampleBlock()));
+        // close()'s drain: the full set of tolerated trailing packets, then the end.
+        client.script.add(ServerMessage.of(ServerPacket.DATA));
+        client.script.add(ServerMessage.of(ServerPacket.TOTALS));
+        client.script.add(ServerMessage.of(ServerPacket.EXTREMES));
+        client.script.add(ServerMessage.of(ServerPacket.PROGRESS));
+        client.script.add(ServerMessage.of(ServerPacket.PROFILE_INFO));
+        client.script.add(ServerMessage.of(ServerPacket.LOG));
+        client.script.add(ServerMessage.of(ServerPacket.PROFILE_EVENTS));
+        client.script.add(ServerMessage.of(ServerPacket.END_OF_STREAM));
+
+        BulkInserterImpl<NRow> inserter = new BulkInserterImpl<>(client, "t_close", NRow.class, 16);
+        inserter.init();
+        inserter.add(new NRow(7L)); // buffered, never flushed
+
+        inserter.close();
+
+        assertAll(
+                () -> assertEquals(0, client.sendDataCalls,
+                        "abandoned buffered rows must be discarded, not flushed as data"),
+                () -> assertEquals(1, client.sendEmptyDataCalls,
+                        "close() must send exactly one terminating empty Data block"),
+                () -> assertFalse(client.poisoned,
+                        "a gracefully terminated INSERT leaves the wire clean — the "
+                                + "connection must stay reusable"));
+    }
+
+    /**
+     * A server {@code Exception} packet met while {@code close()} drains the abandoned
+     * INSERT is terminal but IN-SPEC: the INSERT is over either way, so {@code close()}
+     * must return quietly (never mask the caller's original error with a secondary
+     * throw) and must NOT poison — the exception was a clean protocol exchange, the
+     * wire position is known.
+     */
+    @Test
+    void serverExceptionDuringCloseDrainEndsQuietlyWithoutPoisoning() {
+        ScriptedClient client = new ScriptedClient();
+        client.script.add(ServerMessage.data(sampleBlock()));
+        // close()'s drain: the server rejects the aborted INSERT. Deliberately the LAST
+        // scripted message — a regressing over-drain would hit the fake's script
+        // under-run failure and surface as poisoning.
+        client.script.add(ServerMessage.exception(
+                new io.github.danielbunting.clickhouse.ServerException(
+                        241, "DB::Exception", "Memory limit exceeded", null)));
+
+        BulkInserterImpl<NRow> inserter = new BulkInserterImpl<>(client, "t_exc", NRow.class, 16);
+        inserter.init();
+        inserter.add(new NRow(7L));
+
+        inserter.close(); // must not throw
+
+        assertAll(
+                () -> assertEquals(1, client.sendEmptyDataCalls,
+                        "the graceful terminator still went out before the server error"),
+                () -> assertFalse(client.poisoned,
+                        "a clean server Exception during the drain is in-spec and must "
+                                + "not poison the connection"));
+    }
+
+    /**
+     * A validly-parsed but protocol-violating packet (a stale {@code PONG}) during
+     * {@code close()}'s graceful-termination drain proves the wire is desynced: the
+     * drain's {@link ProtocolException} is swallowed by {@code close()} (close never
+     * throws for this) but the connection MUST be marked poisoned so a pool discards
+     * it instead of recycling an out-of-sync stream.
+     */
+    @Test
+    void unexpectedPacketDuringCloseDrainPoisonsQuietly() {
+        ScriptedClient client = new ScriptedClient();
+        client.script.add(ServerMessage.data(sampleBlock()));
+        // close()'s drain: a stale PONG where only INSERT-termination packets belong.
+        client.script.add(ServerMessage.of(ServerPacket.PONG));
+
+        BulkInserterImpl<NRow> inserter = new BulkInserterImpl<>(client, "t_pong", NRow.class, 16);
+        inserter.init();
+        inserter.add(new NRow(7L));
+
+        inserter.close(); // must not throw — the failure is remembered as poison
+
+        assertAll(
+                () -> assertEquals(1, client.sendEmptyDataCalls,
+                        "close() attempted the graceful terminator before the desync"),
+                () -> assertTrue(client.poisoned,
+                        "an unexpected packet mid-termination leaves an unknown wire "
+                                + "offset: close() must poison so the pool discards"));
     }
 }

@@ -3,6 +3,7 @@ package io.github.danielbunting.clickhouse.jdbc;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -469,6 +470,117 @@ class ChDatabaseMetaDataTest {
     }
 
     // -----------------------------------------------------------------------
+    // getUserName: server probe, memoization, busy-connection fallback
+    // -----------------------------------------------------------------------
+
+    /** A core that answers {@code SELECT currentUser()} (or fails on demand) and counts probes. */
+    private static final class UserProbeCore extends FakeCore {
+        String user = "server_user";
+        RuntimeException failure;
+        int queries;
+
+        @Override
+        public QueryResult query(String sql) {
+            queries++;
+            if (failure != null) {
+                throw failure;
+            }
+            io.github.danielbunting.clickhouse.types.codec.StringColumnCodec codec =
+                    new io.github.danielbunting.clickhouse.types.codec.StringColumnCodec();
+            int rows = user == null ? 0 : 1;
+            io.github.danielbunting.clickhouse.types.codec.StringColumn backing =
+                    codec.allocate(rows);
+            if (rows == 1) {
+                codec.set(backing, 0, user);
+            }
+            io.github.danielbunting.clickhouse.types.Column col =
+                    new io.github.danielbunting.clickhouse.types.Column("currentUser()", "String");
+            col.codec(codec);
+            col.values(backing);
+            col.rowCount(rows);
+            io.github.danielbunting.clickhouse.protocol.Block block =
+                    new io.github.danielbunting.clickhouse.protocol.Block();
+            block.addColumn(col);
+            block.rowCount(rows);
+            return new QueryResult() {
+                @Override
+                public java.util.List<String> columnNames() {
+                    return java.util.List.of("currentUser()");
+                }
+
+                @Override
+                public java.util.List<String> columnTypes() {
+                    return java.util.List.of("String");
+                }
+
+                @Override
+                public java.util.Iterator<io.github.danielbunting.clickhouse.protocol.Block> blocks() {
+                    return java.util.List.of(block).iterator();
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+        }
+    }
+
+    private static ChDatabaseMetaData metaOver(UserProbeCore core) {
+        Properties info = new Properties();
+        info.setProperty("database", "testdb");
+        return new ChDatabaseMetaData(new ChConnection(core, JDBC_URL, info, "default"));
+    }
+
+    /** getUserName asks the server via currentUser() and memoizes: one probe for the connection's life. */
+    @Test
+    void getUserNameProbesServerOnceAndMemoizes() throws SQLException {
+        UserProbeCore core = new UserProbeCore();
+        core.user = "alice";
+        ChDatabaseMetaData md = metaOver(core);
+        assertEquals("alice", md.getUserName());
+        assertEquals("alice", md.getUserName(), "the answer cannot change; it is memoized");
+        assertEquals(1, core.queries, "the second call must not probe the server again");
+    }
+
+    /** An empty currentUser() result (defensive edge) reports null rather than throwing. */
+    @Test
+    void getUserNameEmptyResultReturnsNull() throws SQLException {
+        UserProbeCore core = new UserProbeCore();
+        core.user = null;
+        assertNull(metaOver(core).getUserName());
+    }
+
+    /**
+     * While the shared single-operation core connection is busy streaming, the probe
+     * fails with {@code ConcurrentConnectionUseException}; getUserName then falls back
+     * to the locally configured user WITHOUT caching it, so a later idle call still
+     * gets the server's answer.
+     */
+    @Test
+    void getUserNameFallsBackToConfiguredUserWhileConnectionBusy() throws SQLException {
+        UserProbeCore core = new UserProbeCore();
+        core.user = "server_alice";
+        core.failure = new io.github.danielbunting.clickhouse.ConcurrentConnectionUseException(
+                "connection is busy streaming");
+        ChDatabaseMetaData md = metaOver(core);
+        // JDBC_URL carries no userinfo and no user property: the configured user is "default".
+        assertEquals("default", md.getUserName(),
+                "busy connection: fall back to the locally configured user");
+        // Once idle, the probe runs and the SERVER's answer wins (the fallback was not cached).
+        core.failure = null;
+        assertEquals("server_alice", md.getUserName(),
+                "the busy-time fallback must not have been memoized");
+    }
+
+    /** Any non-concurrency probe failure propagates as SQLException per the JDBC contract. */
+    @Test
+    void getUserNameRethrowsNonConcurrencyFailures() {
+        UserProbeCore core = new UserProbeCore();
+        core.failure = new io.github.danielbunting.clickhouse.ClickHouseException("boom");
+        assertThrows(SQLException.class, () -> metaOver(core).getUserName());
+    }
+
+    // -----------------------------------------------------------------------
     // Minimal in-memory fake of the core connection
     // -----------------------------------------------------------------------
 
@@ -477,7 +589,7 @@ class ChDatabaseMetaDataTest {
      * Only implements the subset of methods needed by {@link ChConnection}'s
      * own constructor and helpers; all other methods throw.
      */
-    private static final class FakeCore implements ClickHouseConnection {
+    private static class FakeCore implements ClickHouseConnection {
 
         @Override
         public long executeScalar(String sql) {

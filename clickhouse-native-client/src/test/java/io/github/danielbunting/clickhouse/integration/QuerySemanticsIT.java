@@ -342,6 +342,27 @@ class QuerySemanticsIT extends TypeRoundTripBase {
     }
 
     /**
+     * A NEGATIVE configured {@code queryTimeout} means "no timeout", exactly like the
+     * {@code Duration.ZERO} default: no {@code max_execution_time} may be injected
+     * into the query's settings (the server keeps its own default, 0 = unlimited) —
+     * a negative duration must never round up to a 0/1-second hair-trigger deadline.
+     */
+    @Test
+    void negativeConfigQueryTimeoutMeansNoTimeout() {
+        io.github.danielbunting.clickhouse.ClickHouseConfig cfg =
+                io.github.danielbunting.clickhouse.ClickHouseConfig.builder()
+                        .host(clickHouseHost())
+                        .port(clickHousePort())
+                        .queryTimeout(Duration.ofSeconds(-3))
+                        .build();
+        try (ClickHouseConnection conn = ClickHouseConnection.open(cfg)) {
+            assertEquals(0L, conn.executeScalar(
+                    "SELECT toInt64(getSetting('max_execution_time'))"),
+                    "a negative queryTimeout must not inject max_execution_time");
+        }
+    }
+
+    /**
      * {@code ping()} (reference: ClickHouseClientTest#testPing): the protocol-level
      * Ping/Pong probe answers true on a live connection, false after close, and never
      * throws.

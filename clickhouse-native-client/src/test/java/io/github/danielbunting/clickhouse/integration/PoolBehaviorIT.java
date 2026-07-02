@@ -90,4 +90,50 @@ class PoolBehaviorIT extends IntegrationTestBase {
             }
         }
     }
+
+    /**
+     * A pooled connection is a full {@link ClickHouseConnection}: the combined
+     * {@code (sql, params, settings)} overloads and {@code ping()} delegate to the
+     * borrowed underlying connection rather than falling back to the interface
+     * defaults (which would throw {@link UnsupportedOperationException} for a
+     * genuinely combined call). Proven end-to-end: the bound parameter and the
+     * per-query setting both reach the server through the pooled wrapper.
+     */
+    @Test
+    void pooledConnectionDelegatesCombinedOverloadsAndPing() {
+        try (ClickHouseConnectionPool pool = ClickHouseConnectionPool.builder(config())
+                .size(1).build()) {
+            try (ClickHouseConnection conn = pool.borrow()) {
+                assertTrue(conn.ping(), "ping() delegates to the live underlying connection");
+
+                io.github.danielbunting.clickhouse.QueryParameters params =
+                        io.github.danielbunting.clickhouse.QueryParameters.of(
+                                java.util.Map.of("n", 5));
+                java.util.Map<String, String> settings =
+                        java.util.Map.of("max_block_size", "1000");
+
+                try (io.github.danielbunting.clickhouse.QueryResult r = conn.query(
+                        "SELECT {n:UInt32} + toUInt32(getSetting('max_block_size')) AS v",
+                        params, settings)) {
+                    long v = -1;
+                    var blocks = r.blocks();
+                    while (blocks.hasNext()) {
+                        var block = blocks.next();
+                        if (block.rowCount() > 0) {
+                            v = ((Number) block.column(0).value(0)).longValue();
+                        }
+                    }
+                    assertEquals(1005L, v,
+                            "the combined query overload must delegate both legs, not "
+                                    + "hit the interface default");
+                }
+
+                // The combined execute overload also delegates (it would throw
+                // UnsupportedOperationException on the interface default).
+                conn.execute("SELECT {n:UInt32}", params, settings);
+
+                assertTrue(conn.ping(), "the pooled connection stays healthy afterwards");
+            }
+        }
+    }
 }

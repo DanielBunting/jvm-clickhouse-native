@@ -10,17 +10,21 @@ import java.io.IOException
  * values.
  *
  * `Nothing` is never a stored column on its own; it surfaces only as the
- * element type of an empty / NULL-only array, e.g. `SELECT []` yields an
- * `Array(Nothing)` column whose flattened value section is empty. Because the
- * flattened element count for such a column is always `0`, this codec's
- * [read]/[write] are no-ops over zero elements and [get]
- * returns `null`.
+ * element type of an empty or NULL-only array: `SELECT []` yields
+ * `Array(Nothing)` (zero elements), and `SELECT [NULL]` yields
+ * `Array(Nullable(Nothing))` (N elements, all NULL).
+ *
+ * On the wire ClickHouse's `SerializationNothing` is **one dummy byte per
+ * value** (`serializeBinaryBulk` writes a zero byte per row and
+ * `deserializeBinaryBulk` skips them), so [read]/[write] must consume/emit
+ * exactly `rowCount` bytes — a mismatch desyncs the whole stream. The bytes
+ * carry no information; [get] always returns `null`.
  *
  * Providing this codec lets [io.github.danielbunting.clickhouse.types.codec.ArrayColumnCodec]
- * resolve `Array(Nothing)` (empty arrays) instead of throwing on the unknown
- * inner type.
+ * resolve `Array(Nothing)` / `Array(Nullable(Nothing))` instead of throwing
+ * on the unknown inner type.
  *
- * Backing array type: `Object[]` (always length 0 in practice).
+ * Backing array type: `Object[]` (contents ignored).
  */
 public class NothingCodec : ColumnCodec<Array<Any?>> {
 
@@ -34,13 +38,18 @@ public class NothingCodec : ColumnCodec<Array<Any?>> {
 
     @Throws(IOException::class)
     override fun read(input: BinaryReader, rowCount: Int, dest: Array<Any?>) {
-        // Nothing carries no values; a Nothing column always has rowCount == 0.
-        // Nothing to read.
+        // One dummy byte per value; content is meaningless.
+        if (rowCount > 0) {
+            input.readBytes(rowCount)
+        }
     }
 
     @Throws(IOException::class)
     override fun write(out: BinaryWriter, src: Array<Any?>, rowCount: Int) {
-        // No values to write.
+        // One dummy (zero) byte per value, mirroring SerializationNothing.
+        if (rowCount > 0) {
+            out.writeBytes(ByteArray(rowCount), 0, rowCount)
+        }
     }
 
     override fun get(array: Array<Any?>, row: Int): Any? {

@@ -207,6 +207,22 @@ class DefaultTypeParserTest {
         assertEquals("UInt32", DefaultTypeParser.unwrapNullable("UInt32"));
     }
 
+    /**
+     * A Tuple element whose leading token is NOT a plain identifier — here a
+     * backtick-quoted name containing a space — is not split into a field name: the
+     * whole element is treated as the type, so it fails fast as an unsupported type
+     * carrying the FULL element text (proving no mis-split), rather than silently
+     * parsing {@code String} under a half-parsed name. Backticked tuple field names
+     * are the supported-type boundary today; move this test when support lands.
+     */
+    @Test
+    void tupleElementWithNonIdentifierLeadingTokenIsNotSplitIntoFieldName() {
+        UnsupportedTypeException ex = assertThrows(UnsupportedTypeException.class,
+                () -> parser.parse("Tuple(`a b` UInt32)"));
+        assertTrue(ex.getMessage().contains("`a b` UInt32"),
+                "the whole element must be reported as the type, was: " + ex.getMessage());
+    }
+
     @Test
     void unsupportedTypeThrows() {
         assertThrows(ClickHouseException.class, () -> parser.parse("Bogus"));

@@ -172,4 +172,44 @@ class MergedFeaturesIT extends TypeRoundTripBase {
                     "escaped quote inside a string element round-trips");
         }
     }
+
+    /**
+     * The COMBINED {@code query(sql, params, settings)} overload carries both legs on
+     * one Query packet: the bound parameter and the per-query setting are both visible
+     * to the same statement — proven by computing a value from the two together.
+     */
+    @Test
+    void combinedQueryCarriesParamsAndSettingsTogether() {
+        try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
+            try (QueryResult r = conn.query(
+                    "SELECT {n:UInt32} + toUInt32(getSetting('max_block_size')) AS v",
+                    QueryParameters.of(Map.of("n", 5)),
+                    Map.of("max_block_size", "1000"))) {
+                List<Object[]> rows = materialize(r);
+                assertEquals(1, rows.size(), "one row expected");
+                assertEquals(1005L, ((Number) rows.get(0)[0]).longValue(),
+                        "5 (bound param) + 1000 (per-query setting) proves both legs "
+                                + "reached the server on the same query");
+            }
+        }
+    }
+
+    /**
+     * The COMBINED {@code execute(sql, params, settings)} overload likewise applies
+     * both legs to a no-result statement: the INSERTed value is computed from the
+     * bound parameter plus the per-query setting, then read back.
+     */
+    @Test
+    void combinedExecuteCarriesParamsAndSettingsTogether() {
+        withTable("t_combined_exec", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table + " (v UInt64) ENGINE = Memory");
+            conn.execute(
+                    "INSERT INTO " + table
+                            + " SELECT {n:UInt32} + toUInt32(getSetting('max_block_size'))",
+                    QueryParameters.of(Map.of("n", 5)),
+                    Map.of("max_block_size", "1000"));
+            assertEquals(1005L, conn.executeScalar("SELECT max(v) FROM " + table),
+                    "the inserted row proves the param and the setting both applied");
+        });
+    }
 }

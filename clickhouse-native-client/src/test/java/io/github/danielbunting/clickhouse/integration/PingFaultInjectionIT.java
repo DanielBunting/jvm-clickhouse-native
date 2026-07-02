@@ -91,6 +91,11 @@ class PingFaultInjectionIT extends IntegrationTestBase {
                                 + "in flight) left the wire desynced: the connection must be "
                                 + "poisoned so the pool discards it instead of recycling it "
                                 + "into the next borrower's reads");
+
+                // Once poisoned, ping() short-circuits to false WITHOUT touching the
+                // socket — probing a known-desynced wire could only desync it further.
+                assertFalse(client.ping(),
+                        "a poisoned connection must answer false immediately");
             }
         }
     }
@@ -121,5 +126,55 @@ class PingFaultInjectionIT extends IntegrationTestBase {
                                 + "timed-out ping leaves the connection correctly discarded-on-return");
             }
         }
+    }
+
+    /**
+     * {@code ping()} tolerates informational packets interleaved BEFORE the Pong (the
+     * documented keep-draining arm, mirroring the official client): a {@code PROGRESS}
+     * packet spliced into the stream ahead of the genuine Pong is skipped, the Pong is
+     * then consumed, and the probe answers {@code true} with the connection left clean
+     * (un-poisoned and fully usable).
+     *
+     * <p>The injected bytes are a validly-framed empty Progress packet for the
+     * negotiated revision (&ge; 54,453 against a modern server): packet id 0x03
+     * followed by six zero VarUInts — rows, bytes, total_rows, written_rows,
+     * written_bytes, elapsed_ns. Injection happens while the connection is quiescent,
+     * i.e. at a packet boundary, exactly as documented on
+     * {@link FaultInjectingProxy#injectServerToClient}.
+     */
+    @Test
+    void pingSkipsInterleavedProgressBeforePong() throws Exception {
+        try (FaultInjectingProxy proxy = new FaultInjectingProxy(clickHouseHost(), clickHousePort())) {
+            ClickHouseConfig config = proxiedConfig(proxy);
+            try (NativeClientImpl client = new NativeClientImpl(config)) {
+                // A stale Progress packet sits in the receive buffer ahead of the ping.
+                proxy.injectServerToClient(new byte[] {
+                        (byte) ServerPacket.PROGRESS.code, 0, 0, 0, 0, 0, 0});
+
+                assertTrue(client.ping(),
+                        "ping() must skip the interleaved Progress and find the Pong");
+                assertFalse(client.isPoisoned(),
+                        "skipping an informational packet is in-spec — no poisoning");
+                assertTrue(client.ping(),
+                        "the wire is byte-clean afterwards: a follow-up ping still succeeds");
+            }
+        }
+    }
+
+    /**
+     * {@code ping()} on a CLOSED connection answers {@code false} immediately and
+     * never throws — the closed/poisoned guard short-circuits before any socket I/O,
+     * so pool hygiene code can probe unconditionally.
+     */
+    @Test
+    void pingOnClosedConnectionReturnsFalse() {
+        ClickHouseConfig config = ClickHouseConfig.builder()
+                .host(clickHouseHost())
+                .port(clickHousePort())
+                .build();
+        NativeClientImpl client = new NativeClientImpl(config);
+        assertTrue(client.ping(), "sanity: the freshly opened connection answers the probe");
+        client.close();
+        assertFalse(client.ping(), "a closed connection reports false, no throw");
     }
 }

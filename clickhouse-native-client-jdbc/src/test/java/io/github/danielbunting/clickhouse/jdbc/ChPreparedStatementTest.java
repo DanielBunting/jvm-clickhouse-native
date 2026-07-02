@@ -111,6 +111,19 @@ class ChPreparedStatementTest {
         assertEquals("'it\\'s'", ChPreparedStatement.toLiteral("it's"));
     }
 
+    /**
+     * A bound {@link java.util.Map} renders as a ClickHouse map literal with
+     * comma-separated entries, recursing through toLiteral for keys and values.
+     */
+    @Test
+    void rendersMapLiteralWithMultipleEntries() {
+        java.util.Map<Object, Object> map = new java.util.LinkedHashMap<>();
+        map.put("a", 1);
+        map.put("b", "x'y");
+        assertEquals("{'a': 1, 'b': 'x\\'y'}", ChPreparedStatement.toLiteral(map));
+        assertEquals("{}", ChPreparedStatement.toLiteral(java.util.Map.of()));
+    }
+
     @Test
     void rendersTimestampLiteral() {
         Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 5, 30, 13, 45, 7));

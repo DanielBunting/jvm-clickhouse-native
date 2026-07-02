@@ -95,4 +95,54 @@ class QueryParametersToTextTest {
         assertEquals("{'a':1,'b':[2,3]}", QueryParameters.toText(m));
         assertEquals("{}", QueryParameters.toText(java.util.Map.of()));
     }
+
+    /**
+     * Zone-carrying temporals render as their UTC WALL CLOCK: the zone/offset shifts
+     * the instant, then drops out of the text entirely (mirroring the JDBC literal
+     * path) — the server parses a naive date-time against the placeholder's type.
+     */
+    @Test
+    void zonedAndOffsetDateTimeRenderAsUtcWallClock() {
+        java.time.ZonedDateTime zoned = java.time.ZonedDateTime.of(
+                LocalDateTime.of(2026, 5, 30, 15, 45, 7),
+                java.time.ZoneId.of("Europe/Paris")); // UTC+2 on that date
+        assertEquals("2026-05-30 13:45:07", QueryParameters.toText(zoned),
+                "the Paris wall clock shifts to UTC; no zone suffix survives");
+
+        java.time.OffsetDateTime offset = java.time.OffsetDateTime.of(
+                LocalDateTime.of(2026, 5, 30, 8, 45, 7, 123_000_000),
+                java.time.ZoneOffset.ofHours(-5));
+        assertEquals("2026-05-30 13:45:07.123000000", QueryParameters.toText(offset),
+                "the -05:00 offset shifts to UTC; a non-zero fraction renders at "
+                        + "full nanosecond width (DateTime64(9) form)");
+    }
+
+    /**
+     * Element kinds inside composite literals keep their scalar spelling UNQUOTED
+     * when they are not textual: booleans render {@code true}/{@code false},
+     * BigDecimal keeps its plain (non-scientific) form with trailing zeros, and
+     * BigInteger prints full precision — quoting any of these would make the server
+     * parse a String where a numeric/bool element is declared.
+     */
+    @Test
+    void numericAndBooleanCompositeElementsStayUnquoted() {
+        assertEquals("[true,false]",
+                QueryParameters.toText(java.util.List.of(true, false)));
+        assertEquals("[12.50]",
+                QueryParameters.toText(java.util.List.of(new BigDecimal("12.50"))));
+        assertEquals("[12345678901234567890]",
+                QueryParameters.toText(java.util.List.of(
+                        new java.math.BigInteger("12345678901234567890"))),
+                "BigInteger elements keep full precision beyond long range");
+    }
+
+    /** Map values may themselves be maps; the {..} literal nests recursively. */
+    @Test
+    void nestedMapElementRendersRecursively() {
+        java.util.Map<String, Object> inner = new java.util.LinkedHashMap<>();
+        inner.put("x", 1);
+        java.util.Map<String, Object> outer = new java.util.LinkedHashMap<>();
+        outer.put("a", inner);
+        assertEquals("{'a':{'x':1}}", QueryParameters.toText(outer));
+    }
 }

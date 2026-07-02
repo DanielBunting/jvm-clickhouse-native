@@ -257,6 +257,55 @@ class ChResultSetContractTest {
         assertEquals(0, rs.getRow());
     }
 
+    /**
+     * The native protocol interleaves empty blocks (headers/terminators) with data
+     * blocks; {@code next()} skips them (and tolerates a null block from the lazy
+     * iterator) transparently, so the cursor only ever lands on real rows.
+     */
+    @Test
+    void nextSkipsNullAndEmptyBlocks() throws SQLException {
+        Int32Codec codec = new Int32Codec();
+        int[] backing = codec.allocate(1);
+        backing[0] = 42;
+        io.github.danielbunting.clickhouse.protocol.Block data =
+                new io.github.danielbunting.clickhouse.protocol.Block();
+        data.addColumn(RsFixtures.col("num", "Int32", codec, backing, 1));
+        data.rowCount(1);
+        io.github.danielbunting.clickhouse.protocol.Block empty =
+                new io.github.danielbunting.clickhouse.protocol.Block();
+
+        java.util.List<io.github.danielbunting.clickhouse.protocol.Block> stream =
+                new java.util.ArrayList<>();
+        stream.add(empty);
+        stream.add(null);
+        stream.add(data);
+        ChResultSet rs = new ChResultSet(new io.github.danielbunting.clickhouse.QueryResult() {
+            @Override
+            public java.util.List<String> columnNames() {
+                return java.util.List.of("num");
+            }
+
+            @Override
+            public java.util.List<String> columnTypes() {
+                return java.util.List.of("Int32");
+            }
+
+            @Override
+            public java.util.Iterator<io.github.danielbunting.clickhouse.protocol.Block> blocks() {
+                return stream.iterator();
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+
+        assertTrue(rs.next(), "the data row behind the empty/null blocks must be reachable");
+        assertEquals(42, rs.getInt(1));
+        assertFalse(rs.next());
+        assertTrue(rs.isAfterLast());
+    }
+
     // ------------------------------------------------------------------
     // Fetch direction / size
     // ------------------------------------------------------------------

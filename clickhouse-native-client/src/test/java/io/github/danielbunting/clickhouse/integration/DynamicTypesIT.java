@@ -233,4 +233,98 @@ class DynamicTypesIT extends TypeRoundTripBase {
             assertEquals("Array(Nothing)", rows.get(6)[1]);
         });
     }
+
+    /**
+     * ENCODE inference for the NULL-bearing and empty container shapes: a list with a
+     * null element infers {@code Array(Nullable(T))} from its first non-null element, a
+     * list of ONLY nulls infers {@code Array(Nullable(Nothing))} (the server's own type
+     * for {@code [NULL]}), an empty map infers the concrete {@code Map(String, String)},
+     * and a {@code BigInteger} too wide for Int128 rides an {@code Int256} tag. All
+     * round-trip through the flattened Dynamic write path and back.
+     */
+    @Test
+    void dynamicNullableArrayEmptyMapAndInt256Inference() {
+        withTable("dynamic_null_shapes", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+
+            java.math.BigInteger wide = java.math.BigInteger.TWO.pow(200);
+            List<DRow> input = List.of(
+                    new DRow(1, java.util.Arrays.asList(1L, null, 3L)),
+                    new DRow(2, java.util.Collections.singletonList(null)),
+                    new DRow(3, java.util.Map.of()),
+                    new DRow(4, wide));
+
+            try (BulkInserter<DRow> inserter = conn.createBulkInserter(table, DRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT d, dynamicType(d) FROM " + table + " ORDER BY id");
+            assertEquals(4, rows.size());
+
+            assertEquals(java.util.Arrays.asList(1L, null, 3L), rows.get(0)[0],
+                    "null element must survive inside the array");
+            assertEquals("Array(Nullable(Int64))", rows.get(0)[1],
+                    "a null element makes the inferred array Nullable");
+
+            assertEquals(java.util.Collections.singletonList(null), rows.get(1)[0]);
+            assertEquals("Array(Nullable(Nothing))", rows.get(1)[1],
+                    "all-null array infers the server's own [NULL] type");
+
+            assertEquals(java.util.Map.of(), rows.get(2)[0], "empty map round-trips");
+            assertEquals("Map(String, String)", rows.get(2)[1],
+                    "empty map infers a concrete String/String map");
+
+            assertEquals(wide, rows.get(3)[0], "2^200 needs the Int256 tag");
+            assertEquals("Int256", rows.get(3)[1]);
+        });
+    }
+
+    /**
+     * ENCODE inference rejects a map with a null KEY or a null VALUE at {@code add()}
+     * time — before any block bytes exist — with an {@link IllegalArgumentException}
+     * (Dynamic map inference needs a concrete K/V from the first entry; a nullable
+     * value belongs in a typed column instead). The inserter/connection stay usable:
+     * a valid row still round-trips afterwards.
+     */
+    @Test
+    void dynamicMapWithNullKeyOrValueRejectedAtAdd() {
+        withTable("dynamic_null_map_kv", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+
+            java.util.Map<String, Object> nullKey = new java.util.HashMap<>();
+            nullKey.put(null, 1L);
+            java.util.Map<String, Object> nullValue = new java.util.HashMap<>();
+            nullValue.put("k", null);
+
+            try (BulkInserter<DRow> inserter = conn.createBulkInserter(table, DRow.class)) {
+                inserter.init();
+
+                IllegalArgumentException exKey = org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class, () -> inserter.add(new DRow(1, nullKey)));
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        exKey.getMessage().contains("Map keys must be non-null"),
+                        "null-key message, was: " + exKey.getMessage());
+
+                IllegalArgumentException exVal = org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class, () -> inserter.add(new DRow(2, nullValue)));
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        exVal.getMessage().contains("Map values must be non-null"),
+                        "null-value message, was: " + exVal.getMessage());
+
+                inserter.add(new DRow(3, java.util.Map.of("k", 7L)));
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT id, d FROM " + table + " ORDER BY id");
+            assertEquals(1, rows.size(), "only the valid row must land");
+            assertEquals(java.util.Map.of("k", 7L), rows.get(0)[1]);
+        });
+    }
 }

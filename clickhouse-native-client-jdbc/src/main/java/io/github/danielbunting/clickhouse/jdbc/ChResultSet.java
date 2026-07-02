@@ -618,10 +618,9 @@ final class ChResultSet implements ResultSet {
         // Zoned/local views of a temporal column: derived from the boxed Instant at UTC
         // (the driver's temporal contract is the absolute instant; the column timezone
         // only affects how the SERVER interprets wall-clock literals). Callers wanting a
-        // different zone call withZoneSameInstant/atZone themselves.
-        if (type == java.time.Instant.class && v instanceof java.time.Instant) {
-            return v;
-        }
+        // different zone call withZoneSameInstant/atZone themselves. (Identity requests
+        // — Instant-to-Instant, LocalDate-to-LocalDate — never reach this method: the
+        // only caller returns via type.isInstance(v) first.)
         if (type == java.time.ZonedDateTime.class && v instanceof java.time.Instant instant) {
             return instant.atZone(java.time.ZoneOffset.UTC);
         }
@@ -630,9 +629,6 @@ final class ChResultSet implements ResultSet {
         }
         if (type == java.time.LocalDateTime.class && v instanceof java.time.Instant instant) {
             return java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC);
-        }
-        if (type == java.time.LocalDate.class && v instanceof java.time.LocalDate) {
-            return v;
         }
         return null;
     }

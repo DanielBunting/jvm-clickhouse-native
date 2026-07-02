@@ -211,4 +211,83 @@ class JsonTypesIT extends TypeRoundTripBase {
         });
     }
 
+    /**
+     * A dynamic path holding an ARRAY WITH A NULL ELEMENT (server path type
+     * {@code Array(Nullable(Int64))}) decodes with the null rendered as a JSON
+     * {@code null} inside the array — the reconstructed object string preserves the
+     * element positions exactly.
+     */
+    @Test
+    void jsonArrayPathWithNullElementDecodes() {
+        withTable("json_arr_null", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"a\":[1,null,2]}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table);
+            assertEquals(1, rows.size());
+            String j = (String) rows.get(0)[0];
+            assertTrue(j.contains("\"a\":[1,null,2]"),
+                    "array null element must render as JSON null in place, was " + j);
+        });
+    }
+
+    /**
+     * A BACKTICK-QUOTED typed-path name — required for names that are not plain
+     * identifiers, e.g. {@code JSON(`item-id` Int64)} — round-trips on a whole-column
+     * read: the codec must UNQUOTE the name so its canonical sort position and JSON key
+     * match what the server serializes (the server sorts and emits the unquoted name).
+     */
+    @Test
+    void backtickedTypedPathRoundTrips() {
+        withTable("json_typed_backtick", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(`item-id` Int64))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"item-id\":42,\"c\":\"x\"}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table);
+            assertEquals(1, rows.size());
+            String j = (String) rows.get(0)[0];
+            assertTrue(j.contains("\"item-id\":42"),
+                    "backticked typed path must decode under its unquoted key, was " + j);
+            assertTrue(j.contains("\"c\":\"x\""),
+                    "dynamic path must survive alongside the typed one, was " + j);
+        });
+    }
+
+    /**
+     * {@code SKIP path} and {@code SKIP REGEXP '...'} clauses alongside a typed path:
+     * the codec must classify both clause forms as non-typed (a miscount would shift
+     * every sub-column and corrupt the whole read), and the skipped paths simply never
+     * appear in the decoded object because the server does not store them.
+     */
+    @Test
+    void typedPathWithSkipClausesRoundTrips() {
+        withTable("json_typed_skip", (conn, table) -> {
+            conn.execute("SET allow_experimental_json_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, j JSON(a Int64, SKIP b.c, SKIP REGEXP 'tmp.*'))"
+                    + " ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, j) VALUES"
+                    + " (1, '{\"a\":7,\"b\":{\"c\":1},\"tmp_x\":5,\"keep\":\"y\"}')");
+
+            List<Object[]> rows = decode(conn, "SELECT j FROM " + table);
+            assertEquals(1, rows.size());
+            String j = (String) rows.get(0)[0];
+            assertTrue(j.contains("\"a\":7"),
+                    "typed path must decode through its declared Int64, was " + j);
+            assertTrue(j.contains("\"keep\":\"y\""),
+                    "unskipped dynamic path must survive, was " + j);
+            assertTrue(!j.contains("b.c"),
+                    "SKIP path must not be stored or decoded, was " + j);
+            assertTrue(!j.contains("tmp_x"),
+                    "SKIP REGEXP path must not be stored or decoded, was " + j);
+        });
+    }
+
 }

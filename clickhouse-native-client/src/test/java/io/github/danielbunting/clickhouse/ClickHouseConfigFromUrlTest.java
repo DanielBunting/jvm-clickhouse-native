@@ -544,6 +544,24 @@ final class ClickHouseConfigFromUrlTest {
     }
 
     /**
+     * The JDBC-oriented {@link ClickHouseConfig#fromUrl(String, java.util.Properties)}
+     * overload with a {@code null} Properties instance behaves identically to plain
+     * {@link ClickHouseConfig#fromUrl(String)} — no credential override, no rebuild:
+     * the URL-embedded user/password and every other component survive untouched.
+     */
+    @Test
+    void fromUrlWithNullProperties_behavesLikePlainFromUrl() {
+        String url = "chnative://alice:s3cr3t@db.example.com:9100/analytics";
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl(url, null);
+
+        assertEquals("db.example.com", cfg.host());
+        assertEquals(9100, cfg.port());
+        assertEquals("analytics", cfg.database());
+        assertEquals("alice", cfg.username(), "URL user must survive a null Properties");
+        assertEquals("s3cr3t", cfg.password(), "URL password must survive a null Properties");
+    }
+
+    /**
      * A blank/null host with no endpoint list fails the build with a clear message
      * (reference: client-v2 ClientTests#testInvalidConfig — missing endpoint rejected).
      */

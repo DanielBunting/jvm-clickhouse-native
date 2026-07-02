@@ -243,6 +243,63 @@ class ChSqlParsingTest {
         }
     }
 
+    // ---- scanner edge tokens --------------------------------------------------
+
+    /**
+     * Comment-lookalike and operator characters are plain text to the placeholder
+     * scanner: division {@code /}, subtraction {@code -}, a trailing lone {@code -},
+     * {@code /} or {@code :}, and an unbalanced {@code )} never hide or invent a
+     * placeholder.
+     */
+    @Test
+    void scannerTreatsOperatorAndStrayTokensAsPlainText() {
+        assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT 1/2 - 3 + ?"));
+        assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT ? -"));
+        assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT ? /"));
+        assertEquals(0, ChPreparedStatement.countPlaceholders("SELECT a :"),
+                "a trailing lone ':' pairs nothing");
+        assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT a) = ?"),
+                "an unbalanced ')' at depth 0 is ignored");
+    }
+
+    /**
+     * Unterminated quoted regions consume the rest of the text (so a {@code ?} inside
+     * them is never a placeholder), including when the region ends on a trailing
+     * backslash with nothing left to escape.
+     */
+    @Test
+    void unterminatedQuotedRegionSwallowsRestOfText() {
+        assertEquals(0, ChPreparedStatement.countPlaceholders("SELECT 'abc ?"));
+        assertEquals(0, ChPreparedStatement.countPlaceholders("SELECT `id ?"));
+        assertEquals(0, ChPreparedStatement.countPlaceholders("SELECT '?\\"),
+                "a trailing backslash cannot escape past the end of text");
+    }
+
+    /**
+     * Block-comment scanning edges mirror the statement classifier: stray {@code /}
+     * and {@code *} inside a (nesting) comment are text, and a comment cut off
+     * mid-token stays unterminated, hiding any {@code ?} after it.
+     */
+    @Test
+    void blockCommentEdgeTokensInPlaceholderScan() {
+        assertEquals(1, ChPreparedStatement.countPlaceholders(
+                "/* a /* nested */ c/d **e */ SELECT ?"));
+        assertEquals(0, ChPreparedStatement.countPlaceholders("select 1 /*/ ?"),
+                "'/*/' does not open and immediately close");
+        assertEquals(0, ChPreparedStatement.countPlaceholders("select 1 /* ? *"),
+                "a trailing '*' does not terminate the comment");
+        assertEquals(0, ChPreparedStatement.countPlaceholders("select 1 /* ? /"),
+                "a trailing '/' inside the comment is text, not a nested opener");
+    }
+
+    /** A placeholder with no bound value fails substitution with the parameter's 1-based index. */
+    @Test
+    void substituteWithMissingTrailingValueThrows() {
+        SQLException e = assertThrows(SQLException.class, () ->
+                ChPreparedStatement.substitute("SELECT ?, ?", new Object[] {null, 1}));
+        assertEquals("Missing value for parameter 2", e.getMessage());
+    }
+
     // ---- multi-group VALUES with literal '?' (jdbc-v2
     // BaseSqlParserFacadeTest#testPreparedStatementInsertSQL, v1 INSERT parsing) --
 
@@ -351,5 +408,38 @@ class ChSqlParsingTest {
         ps.executeBatch();
 
         assertEquals("INSERT INTO values_t (a) VALUES (1),(2)", core.executed.get(0));
+
+        // The mirror case: "values" at the END of an identifier (letter boundary on
+        // the left) is not the keyword either.
+        ChPreparedStatement ps2 = new ChPreparedStatement(
+                conn(core), "INSERT INTO tvalues (a) VALUES (?)");
+        ps2.setInt(1, 3);
+        ps2.addBatch();
+        ps2.executeBatch();
+        assertEquals("INSERT INTO tvalues (a) VALUES (3)", core.executed.get(1));
+    }
+
+    /**
+     * A quoted identifier NAMED {@code values} (backticked or double-quoted) is not
+     * the VALUES keyword: the adjoining quote character counts as an identifier
+     * character for the word-boundary check, so the collapse splits at the real
+     * {@code VALUES} clause (companion to {@link #batchCollapseIgnoresValuesPrefixedTableName}).
+     */
+    @Test
+    void batchCollapseIgnoresQuotedIdentifierNamedValues() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps = new ChPreparedStatement(
+                conn(core), "INSERT INTO `values` (v) VALUES (?)");
+        ps.setInt(1, 1);
+        ps.addBatch();
+        ps.executeBatch();
+        assertEquals("INSERT INTO `values` (v) VALUES (1)", core.executed.get(0));
+
+        ChPreparedStatement ps2 = new ChPreparedStatement(
+                conn(core), "INSERT INTO \"values\" (v) VALUES (?)");
+        ps2.setInt(1, 2);
+        ps2.addBatch();
+        ps2.executeBatch();
+        assertEquals("INSERT INTO \"values\" (v) VALUES (2)", core.executed.get(1));
     }
 }

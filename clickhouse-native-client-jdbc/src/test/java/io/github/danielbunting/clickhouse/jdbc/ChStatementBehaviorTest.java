@@ -36,6 +36,7 @@ class ChStatementBehaviorTest {
     private static final class ScriptedCore extends FakeCore {
         final List<String> executed = new ArrayList<>();
         final List<String> queried = new ArrayList<>();
+        final List<java.util.Map<String, String>> executeSettings = new ArrayList<>();
         String failOn;
 
         @Override
@@ -44,6 +45,12 @@ class ChStatementBehaviorTest {
                 throw new ClickHouseException("scripted failure for: " + sql);
             }
             executed.add(sql);
+        }
+
+        @Override
+        public void execute(String sql, java.util.Map<String, String> settings) {
+            executeSettings.add(settings);
+            execute(sql);
         }
 
         @Override
@@ -272,6 +279,58 @@ class ChStatementBehaviorTest {
         rs.close();
         assertTrue(s.isClosed(),
                 "statement must close once its dependent result set is closed");
+    }
+
+    /**
+     * By default (no {@code closeOnCompletion()}), closing the dependent result set
+     * leaves the statement OPEN, per the JDBC contract that close-on-completion is
+     * opt-in.
+     */
+    @Test
+    void resultSetCloseWithoutCloseOnCompletionLeavesStatementOpen() throws SQLException {
+        ChStatement s = connected(new ScriptedCore());
+        ResultSet rs = s.executeQuery("SELECT 1");
+        rs.close();
+        assertFalse(s.isClosed(),
+                "without closeOnCompletion() the statement must survive its result set");
+        // The statement remains usable for another execution.
+        assertNotNull(s.executeQuery("SELECT 2"));
+    }
+
+    /**
+     * Closing a closeOnCompletion statement that still holds an OPEN result set is
+     * clean: {@code Statement.close()} closes the dependent result set, and the
+     * callback that fires mid-close (statement already marked closed) must not
+     * misbehave.
+     */
+    @Test
+    void statementCloseWithCloseOnCompletionClosesOpenResultSet() throws SQLException {
+        ChStatement s = connected(new ScriptedCore());
+        s.closeOnCompletion();
+        ResultSet rs = s.executeQuery("SELECT 1");
+        s.close();
+        assertTrue(s.isClosed());
+        assertTrue(rs.isClosed(), "statement close must close its dependent result set");
+        // Idempotent afterwards.
+        s.close();
+        rs.close();
+    }
+
+    /**
+     * A positive {@link ChStatement#setQueryTimeout} travels to the server as the
+     * {@code max_execution_time} per-query setting on the UPDATE path too (the query
+     * path is covered elsewhere), so the server enforces the deadline.
+     */
+    @Test
+    void queryTimeoutTravelsAsMaxExecutionTimeOnUpdatePath() throws SQLException {
+        ScriptedCore core = new ScriptedCore();
+        ChStatement s = connected(core);
+        s.setQueryTimeout(7);
+        assertEquals(0, s.executeUpdate("INSERT INTO t VALUES (1)"));
+        assertEquals(List.of("INSERT INTO t VALUES (1)"), core.executed);
+        assertEquals(List.of(java.util.Map.of("max_execution_time", "7")),
+                core.executeSettings,
+                "the timeout must ride the wire as max_execution_time");
     }
 
     /**
