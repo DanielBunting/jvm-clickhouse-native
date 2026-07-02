@@ -90,6 +90,27 @@ try (AdbcStatement.QueryResult result = statement.executeQuery()) {
 - `AdbcStatement.cancel()` (and `AdbcConnection.cancel()`) sends a real Cancel packet for the in-flight query.
 - DDL/DML go through `executeUpdate()`; ClickHouse's native protocol reports no affected-row count for these, so `UpdateResult.getAffectedRows()` is `-1`.
 
+## Parameterized queries
+
+When the SQL carries placeholders, `bind(VectorSchemaRoot)` supplies **parameters** instead of ingest data — one parameter set per **row** of the bound root. Values travel separately on the Query packet as ClickHouse server-side parameters and the *server* casts them against each placeholder's type: no client-side string interpolation, hence no SQL-injection or type-fidelity hazard.
+
+Two placeholder dialects:
+
+- **Positional `?`** (what generic ADBC tooling emits): each `?` is rewritten to a typed server-side placeholder `{_pN:String}` (`Nullable(String)` for null cells) and root fields map to them left-to-right. Values travel as text the server casts to the column/expression type. The scanner understands string literals, quoted identifiers, comments, `?::type` casts and the ClickHouse ternary `cond ? a : b`, so only real placeholders bind.
+- **Native `{name:Type}`**: passes through untouched; root fields map **by name**, and the declared type gives full fidelity (use this for `Array(...)`/`Map(...)`/`DateTime64` parameters or when `Nullable` disambiguation matters).
+
+```java
+statement.setSqlQuery("SELECT id FROM events WHERE name = ? AND ts > {since:DateTime64(6, 'UTC')}");
+statement.getParameterSchema();      // the root shape bind() expects
+statement.bind(parameterRoot);       // one row = one parameter set
+statement.executeQuery();            // exactly one parameter row
+statement.executeUpdate();           // runs once per parameter row (the batch shape)
+```
+
+- `executeQuery()` uses exactly one parameter row (a multi-row root raises `NOT_IMPLEMENTED`); `executeUpdate()` executes the statement once per row — the batch-INSERT shape.
+- A `FixedSizeBinary(16)` parameter cell is re-widened through the field's `clickhouse.type` metadata (UUID vs IPv6); `Time`/`Interval` values have no parameter text form and raise `NOT_IMPLEMENTED`.
+- A bound root is ignored when the SQL has no placeholders; placeholders without a bound root raise `INVALID_STATE`.
+
 ## Bulk ingest
 
 `bulkIngest` feeds a bound `VectorSchemaRoot` straight into the native bulk inserter — the inverse of the read bridge, no intermediate POJO:

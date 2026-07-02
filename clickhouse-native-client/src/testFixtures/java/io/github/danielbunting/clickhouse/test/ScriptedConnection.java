@@ -1,5 +1,6 @@
 package io.github.danielbunting.clickhouse.test;
 
+import io.github.danielbunting.clickhouse.QueryParameters;
 import io.github.danielbunting.clickhouse.QueryResult;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -31,6 +32,10 @@ public class ScriptedConnection extends FakeClickHouseConnection {
     public final List<String> executed = new ArrayList<>();
     public final List<String> queried = new ArrayList<>();
     public final List<String> scalars = new ArrayList<>();
+    /** Server-side parameter sets passed alongside {@link #queried} entries (null when none). */
+    public final List<QueryParameters> queriedParams = new ArrayList<>();
+    /** Server-side parameter sets passed alongside {@link #executed} entries (null when none). */
+    public final List<QueryParameters> executedParams = new ArrayList<>();
     public int cancelCount;
     public int closeCount;
 
@@ -71,7 +76,25 @@ public class ScriptedConnection extends FakeClickHouseConnection {
     }
 
     @Override
+    public QueryResult query(String sql, QueryParameters params) {
+        // Record the parameter set, then share the scripting/recording logic of query(sql).
+        queriedParams.add(params);
+        return queryInternal(sql);
+    }
+
+    @Override
+    public void execute(String sql, QueryParameters params) {
+        executedParams.add(params);
+        executeInternal(sql);
+    }
+
+    @Override
     public QueryResult query(String sql) {
+        queriedParams.add(null);
+        return queryInternal(sql);
+    }
+
+    private QueryResult queryInternal(String sql) {
         queried.add(sql);
         if (nextQueryFailure != null) {
             RuntimeException failure = nextQueryFailure;
@@ -91,6 +114,11 @@ public class ScriptedConnection extends FakeClickHouseConnection {
 
     @Override
     public void execute(String sql) {
+        executedParams.add(null);
+        executeInternal(sql);
+    }
+
+    private void executeInternal(String sql) {
         executed.add(sql);
         if (nextExecuteFailure != null) {
             RuntimeException failure = nextExecuteFailure;

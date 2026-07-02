@@ -160,6 +160,23 @@ public class QueryParameters private constructor(
         public fun toText(value: Any?): String? {
             return when (value) {
                 null -> null // becomes the \N sentinel at wire time
+                // Composites carry their own element-level escaping (see appendElement).
+                is List<*> -> renderArray(value)
+                is Map<*, *> -> renderMap(value)
+                // Scalars: the raw text, escaped into the ESCAPED form the server's parameter
+                // parser reads (see escapeParamText).
+                else -> rawText(value)?.let(::escapeParamText)
+            }
+        }
+
+        /**
+         * The raw (unescaped) textual form of a scalar value — the content used both directly
+         * by [toText] (which applies wire escaping on top) and as the quoted-literal content of
+         * composite elements in [appendElement] (which applies its own quoting instead).
+         */
+        private fun rawText(value: Any?): String? {
+            return when (value) {
+                null -> null // becomes the \N sentinel at wire time
                 // ClickHouse Bool parameters accept the textual 'true'/'false'.
                 is Boolean -> if (value) "true" else "false"
                 is BigDecimal -> value.toPlainString()
@@ -183,12 +200,45 @@ public class QueryParameters private constructor(
                 // Composites travel as ClickHouse literal text — the server's parameter
                 // parser reads the same [..]/{..:..} grammar as SQL literals (verified
                 // empirically: quoted strings inside, backslash escapes, bare NULL).
-                is List<*> -> renderArray(value)
-                is Map<*, *> -> renderMap(value)
                 // String and any other reference type: its textual representation. The server
                 // casts this to the placeholder's declared type, so no SQL quoting is applied.
                 else -> value.toString()
             }
+        }
+
+        /**
+         * Escapes a textual parameter value into the ClickHouse ESCAPED form the server's
+         * parameter parser expects: backslash and the control characters NUL/newline/carriage
+         * return/tab become their backslash escapes (without this, a raw `\` is
+         * escape-interpreted server-side — silent corruption — and a raw newline aborts the
+         * parse with BAD_QUERY_PARAMETER). Quotes are NOT escaped: they are structural in
+         * composite (Array/Map) parameter text and content in String text, and the server
+         * accepts them raw in both. Values without any escapable character pass through
+         * unchanged.
+         */
+        private fun escapeParamText(s: String): String {
+            var needsEscaping = false
+            for (c in s) {
+                if (c == '\\' || c == '\n' || c == '\r' || c == '\t' || c == '\u0000') {
+                    needsEscaping = true
+                    break
+                }
+            }
+            if (!needsEscaping) {
+                return s
+            }
+            val sb = StringBuilder(s.length + 8)
+            for (c in s) {
+                when (c) {
+                    '\\' -> sb.append("\\\\")
+                    '\n' -> sb.append("\\n")
+                    '\r' -> sb.append("\\r")
+                    '\t' -> sb.append("\\t")
+                    '\u0000' -> sb.append("\\0")
+                    else -> sb.append(c)
+                }
+            }
+            return sb.toString()
         }
 
         private fun renderArray(list: List<*>): String {
@@ -231,7 +281,7 @@ public class QueryParameters private constructor(
                 else -> {
                     // Everything textual (String, temporals, UUID, IP) is quoted using the
                     // scalar rendering as its content.
-                    val text = toText(value) ?: "NULL"
+                    val text = rawText(value) ?: "NULL"
                     sb.append('\'')
                     for (c in text) {
                         if (c == '\\' || c == '\'') {

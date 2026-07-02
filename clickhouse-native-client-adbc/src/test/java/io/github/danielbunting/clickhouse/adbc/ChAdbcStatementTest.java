@@ -162,11 +162,10 @@ class ChAdbcStatementTest {
     }
 
     @Test
-    @DisplayName("DIVERGENCE: bind() on a non-ingest statement is silently ignored by executeUpdate")
+    @DisplayName("a bound root is ignored when the SQL has no parameter placeholders")
     void bindOnNonIngestStatementIsIgnored(BufferAllocator allocator) throws Exception {
-        // There is no query-parameter binding path (unlike JDBC's PreparedStatement); a bound
-        // root only feeds bulkIngest. Pinned so a future param-binding feature changes this
-        // test deliberately.
+        // A bound root is only consulted when the statement is an ingest statement or the SQL
+        // carries placeholders (see ChAdbcStatementParamsTest); plain SQL executes verbatim.
         ScriptedConnection core = new ScriptedConnection();
         Schema schema = new Schema(List.of(Field.nullable("x", new ArrowType.Int(64, true))));
         try (ChAdbcConnection connection = AdbcTestConnections.connection(core, allocator);
