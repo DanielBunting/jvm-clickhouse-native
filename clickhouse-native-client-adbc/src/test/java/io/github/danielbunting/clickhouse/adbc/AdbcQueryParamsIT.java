@@ -116,6 +116,59 @@ class AdbcQueryParamsIT extends AdbcRoundTripBase {
     }
 
     @Test
+    @DisplayName("adversarial payloads arrive byte-exact via a PARAMETERLESS read-back")
+    void adversarialPayloadsArriveByteExact(BufferAllocator allocator) throws Exception {
+        // Regression proof for the QueryParameters ESCAPED-form fix, asymmetric on purpose:
+        // the write side binds parameters, the read side is plain SQL — so a symmetric
+        // encode/decode bug cannot cancel out (the WHERE-equality test above could pass even
+        // if both sides corrupted identically). Before the fix "a\b" arrived as a + backspace
+        // (silent corruption) and the newline payload failed with BAD_QUERY_PARAMETER (457).
+        String table = uniqueTable("adbc_qp_exact");
+        String[] payloads = {
+                "a\\b", "c:\\path\\to\\file", "trailing\\", "line\nbreak",
+                "tab\there", "cr\rreturn", "nul\u0000byte", "it's",
+                "quote\"double", "\\N", "{p:String}", "héllo 世界",
+        };
+        AdbcDatabase database = new ChAdbcDriver(allocator).open(connectParams());
+        try (AdbcConnection conn = database.connect()) {
+            execDdl(conn, "CREATE TABLE " + table + " (id Int64, v String) ENGINE = Memory");
+            try {
+                try (AdbcStatement statement = conn.createStatement();
+                        VectorSchemaRoot root = utf8Root(allocator, "id", "v")) {
+                    VarCharVector id = (VarCharVector) root.getVector("id");
+                    VarCharVector v = (VarCharVector) root.getVector("v");
+                    for (int i = 0; i < payloads.length; i++) {
+                        id.setSafe(i, String.valueOf(i).getBytes(StandardCharsets.UTF_8));
+                        v.setSafe(i, payloads[i].getBytes(StandardCharsets.UTF_8));
+                    }
+                    root.setRowCount(payloads.length);
+                    statement.setSqlQuery("INSERT INTO " + table + " VALUES (?, ?)");
+                    statement.bind(root);
+                    statement.executeUpdate();
+                }
+
+                List<List<Object>> read = rows(conn,
+                        "SELECT v, length(v) FROM " + table + " ORDER BY id");
+                assertEquals(payloads.length, read.size());
+                for (int i = 0; i < payloads.length; i++) {
+                    assertEquals(payloads[i], read.get(i).get(0),
+                            "row " + i + " must arrive byte-exact");
+                    assertEquals((long) payloads[i].getBytes(StandardCharsets.UTF_8).length,
+                            read.get(i).get(1), "server-side length of row " + i);
+                }
+
+                // The literal 2-char string \N must not have collapsed into SQL NULL.
+                assertEquals(List.of(List.of(1L)),
+                        rows(conn, "SELECT count() FROM " + table + " WHERE v = '\\\\N'"));
+            } finally {
+                execDdl(conn, "DROP TABLE IF EXISTS " + table);
+            }
+        } finally {
+            database.close();
+        }
+    }
+
+    @Test
     @DisplayName("#1373: a null inside a parameter batch inserts SQL NULL, not a filler")
     void issue1373NullInBatch(BufferAllocator allocator) throws Exception {
         String table = uniqueTable("adbc_qp_1373");
