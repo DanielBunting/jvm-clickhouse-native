@@ -7,6 +7,52 @@ plugins {
     // Maven Central publishing (Central Portal): builds the sources/javadoc jars,
     // signs all artifacts, and uploads the bundle. Version pinned in the root build.
     id("com.vanniktech.maven.publish")
+    // Uber-jar for the downloadable kotlin-query-flow bundle (Kotlin/Flow layer +
+    // core + coroutines + reflect + stdlib + codecs).
+    id("com.gradleup.shadow")
+}
+
+// Self-contained Kotlin coroutines/Flow client jar (this layer + core + coroutines +
+// kotlin-reflect + stdlib + lz4/zstd codecs) for the kotlin-query-flow.zip release
+// bundle. Codecs bundled but not relocated. Packaged by the root :releaseBundles task.
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    archiveBaseName.set("clickhouse-native-client-kotlin")
+    archiveClassifier.set("all")
+    mergeServiceFiles()
+}
+
+// Keep the uber-jar OUT of the Maven Central publication (GitHub Release asset only).
+(components["java"] as org.gradle.api.component.AdhocComponentWithVariants)
+    .withVariantsFromConfiguration(configurations["shadowRuntimeElements"]) { skip() }
+
+val kotlinFlowBundleReadme = tasks.register("kotlinFlowBundleReadme") {
+    description = "README shipped inside kotlin-query-flow.zip."
+    val readme = layout.buildDirectory.file("bundle-readme/README.txt")
+    val v = project.version.toString()
+    outputs.file(readme)
+    doLast {
+        readme.get().asFile.writeText(
+            """
+            ClickHouse Native Client — Kotlin coroutines/Flow $v — single-jar bundle
+            =======================================================================
+
+            Kotlin coroutines/Flow/DSL query support over the native TCP protocol,
+            bundled with the core client, kotlinx-coroutines, kotlin-reflect, the
+            Kotlin stdlib and lz4/zstd codecs. Self-contained: add
+            clickhouse-native-client-kotlin-$v-all.jar to the classpath.
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
+// Packages the Kotlin/Flow uber-jar (+ README) into kotlin-query-flow.zip.
+tasks.register<Zip>("kotlinFlowBundle") {
+    group = "distribution"
+    description = "Packages the Kotlin coroutines/Flow uber-jar into kotlin-query-flow.zip."
+    archiveFileName.set("kotlin-query-flow.zip")
+    destinationDirectory.set(rootProject.layout.buildDirectory.dir("release-assets"))
+    from(tasks.named("shadowJar"))
+    from(kotlinFlowBundleReadme)
 }
 
 java {

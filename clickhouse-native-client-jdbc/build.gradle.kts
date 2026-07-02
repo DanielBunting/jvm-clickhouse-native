@@ -6,6 +6,8 @@ plugins {
     // Maven Central publishing (Central Portal): builds the sources/javadoc jars,
     // signs all artifacts, and uploads the bundle. Version pinned in the root build.
     id("com.vanniktech.maven.publish")
+    // Uber-jar for the downloadable driver bundle (JDBC + core + Kotlin stdlib + codecs).
+    id("com.gradleup.shadow")
 }
 
 java {
@@ -67,6 +69,62 @@ tasks.test {
     useJUnitPlatform {
         excludeTags("integration")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Uber-jar: clickhouse-native-jdbc-all
+// ---------------------------------------------------------------------------
+// A single self-contained driver jar (JDBC layer + core client + Kotlin stdlib +
+// lz4/zstd codecs) for dropping into any JDBC tool (DataGrip, DBeaver, ...) with
+// no Maven resolution. mergeServiceFiles() preserves the META-INF/services
+// java.sql.Driver registration. The native-lib deps (lz4/zstd) are bundled but
+// NOT relocated — relocation would break their fixed native-resource paths.
+// Packaged into jdbc.zip by the root :releaseBundles task.
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    archiveBaseName.set("clickhouse-native-jdbc")
+    archiveClassifier.set("all")
+    mergeServiceFiles()
+}
+
+// Keep the uber-jar OUT of the Maven Central publication — it ships only as a
+// GitHub Release asset. Without this, the shadow plugin adds its -all.jar to the
+// published java component (via the shadowRuntimeElements variant).
+(components["java"] as org.gradle.api.component.AdhocComponentWithVariants)
+    .withVariantsFromConfiguration(configurations["shadowRuntimeElements"]) { skip() }
+
+val jdbcBundleReadme = tasks.register("jdbcBundleReadme") {
+    description = "README shipped inside jdbc.zip."
+    val readme = layout.buildDirectory.file("bundle-readme/README.txt")
+    val v = project.version.toString()
+    outputs.file(readme)
+    doLast {
+        readme.get().asFile.writeText(
+            """
+            ClickHouse Native JDBC Driver $v (single-jar bundle)
+            ====================================================
+
+            Setup (DataGrip / DBeaver / any JDBC tool):
+              1. Add clickhouse-native-jdbc-$v-all.jar as the only driver file.
+              2. Driver class:  io.github.danielbunting.clickhouse.jdbc.ClickHouseDriver
+              3. JDBC URL:      jdbc:chnative://<host>:9000/<database>
+                                e.g. jdbc:chnative://localhost:9000/default
+              4. Supply user / password as connection properties.
+
+            This is the native-protocol driver (port 9000), NOT the HTTP driver (8123).
+            The jar is self-contained — no other files are needed.
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
+// Packages the JDBC uber-jar (+ README) into jdbc.zip under the shared release-assets dir.
+tasks.register<Zip>("jdbcBundle") {
+    group = "distribution"
+    description = "Packages the JDBC uber-jar into jdbc.zip."
+    archiveFileName.set("jdbc.zip")
+    destinationDirectory.set(rootProject.layout.buildDirectory.dir("release-assets"))
+    from(tasks.named("shadowJar"))
+    from(jdbcBundleReadme)
 }
 
 // Extracts the version matrix from ClickHouseImages.SUPPORTED_VERSIONS (the single
