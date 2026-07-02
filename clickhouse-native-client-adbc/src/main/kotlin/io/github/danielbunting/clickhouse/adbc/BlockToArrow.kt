@@ -3,8 +3,10 @@ package io.github.danielbunting.clickhouse.adbc
 import io.github.danielbunting.clickhouse.protocol.Block
 import io.github.danielbunting.clickhouse.types.Column
 import io.github.danielbunting.clickhouse.types.codec.DateTime64Codec
+import io.github.danielbunting.clickhouse.types.codec.DynamicColumnCodec
 import io.github.danielbunting.clickhouse.types.codec.LowCardinalityColumnCodec
 import io.github.danielbunting.clickhouse.types.codec.NullableColumnCodec
+import io.github.danielbunting.clickhouse.types.codec.VariantColumnCodec
 import org.apache.arrow.vector.BigIntVector
 import org.apache.arrow.vector.BitVector
 import org.apache.arrow.vector.DateDayVector
@@ -73,12 +75,13 @@ public object BlockToArrow {
 
     private fun writeColumn(vector: FieldVector, column: Column, rows: Int) {
         val nulls = column.nulls()
-        // Most nullable columns expose validity via the parallel null-map. LowCardinality(Nullable(T))
-        // is the exception: its null-ness lives inside the dictionary codec, so derive it from the
-        // boxed value instead.
+        // Most nullable columns expose validity via the parallel null-map. The exceptions keep
+        // their null-ness inside the codec's boxed value: LowCardinality(Nullable(T)) (dictionary
+        // nulls), a NullableColumnCodec surfacing as the column codec (e.g. inside
+        // SimpleAggregateFunction), and the inherently-nullable Variant/Dynamic columns.
         val nullAt: (Int) -> Boolean = when {
             nulls != null -> { r -> nulls[r] }
-            isLowCardinalityNullable(column) -> { r -> column.value(r) == null }
+            derivesNullFromValue(column) -> { r -> column.value(r) == null }
             else -> { _ -> false }
         }
         when (vector) {
@@ -140,7 +143,12 @@ public object BlockToArrow {
             is BigIntVector -> vector.setSafe(index, (value as Number).toLong())
             is UInt1Vector -> vector.setSafe(index, (value as Number).toInt())
             is UInt2Vector -> vector.setSafe(index, (value as Number).toInt())
-            is UInt4Vector -> vector.setSafe(index, (value as Number).toInt())
+            // An IPv4 inside a container boxes to Inet4Address; widen its 4 network-order
+            // bytes back to the unsigned-int representation the top-level column uses.
+            is UInt4Vector -> vector.setSafe(index, when (value) {
+                is InetAddress -> ByteBuffer.wrap(value.address).int
+                else -> (value as Number).toInt()
+            })
             is UInt8Vector -> vector.setSafe(index, (value as Number).toLong())
             is Float4Vector -> vector.setSafe(index, (value as Number).toFloat())
             is Float8Vector -> vector.setSafe(index, (value as Number).toDouble())
@@ -250,9 +258,11 @@ public object BlockToArrow {
         }
     }
 
-    private fun isLowCardinalityNullable(column: Column): Boolean {
-        val codec = column.codec()
-        return codec is LowCardinalityColumnCodec && codec.inner() is NullableColumnCodec
+    private fun derivesNullFromValue(column: Column): Boolean = when (val codec = column.codec()) {
+        is NullableColumnCodec -> true
+        is VariantColumnCodec, is DynamicColumnCodec -> true
+        is LowCardinalityColumnCodec -> codec.inner() is NullableColumnCodec
+        else -> false
     }
 
     /** UUID/IPv6/FixedString → fixed-width bytes, right-padded with NULs to `width`. */

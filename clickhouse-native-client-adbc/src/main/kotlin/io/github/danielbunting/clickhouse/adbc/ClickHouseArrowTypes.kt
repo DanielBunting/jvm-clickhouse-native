@@ -136,6 +136,10 @@ public object ClickHouseArrowTypes {
                 }
                 return Field(name, FieldType(nullable, ArrowType.Struct(), null), children)
             }
+            // Variant/Dynamic columns hold NULL without a Nullable(...) wrapper, so their
+            // Arrow field is always nullable.
+            is VariantColumnCodec, is DynamicColumnCodec ->
+                return Field(name, FieldType(true, leafArrowType(codec), null), null)
             else -> return Field(name, FieldType(nullable, leafArrowType(codec), null), null)
         }
     }

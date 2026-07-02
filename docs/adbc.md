@@ -156,8 +156,14 @@ Representation choices are fixed and asserted by the test suite (`BlockToArrowTe
 | `Array(T)` | `List<T>` |
 | `Map(K, V)` | `Map` (`struct<key, value>`, `keysSorted = false`) |
 | `Tuple(…)` | `Struct` |
+| `Int128` / `UInt128` / `Int256` / `UInt256` | `Utf8` — exact base-10 decimal string (no Arrow width fits) |
+| `BFloat16` | `Float32` (a bf16 widens exactly) |
+| `JSON` / `Dynamic` / `Variant(…)` | `Utf8` — the rendered string form; `Dynamic`/`Variant` fields are always nullable (they hold NULL without a `Nullable` wrapper) |
+| `Time` / `Time64(p)` | `Duration` (spans may exceed 24h, so Arrow's time-of-day types don't fit) |
+| `Interval*` (non-calendar) | `Duration`; calendar units (Month/Quarter/Year) → `Interval(YEAR_MONTH)` |
+| `Nothing` | `Null` |
 
-A type with no Arrow mapping (e.g. `Int128`/`Int256`) raises `AdbcException(NOT_IMPLEMENTED)` rather than a raw error.
+Every mapped field also carries the exact source type string in its Arrow field metadata (key `clickhouse.type`), so a read→ingest round trip recreates the original column type even where the structural mapping is lossy (e.g. UUID vs IPv6). A type the client cannot decode at all (e.g. an `AggregateFunction(...)` state column) raises `AdbcException(NOT_IMPLEMENTED)` rather than a raw error.
 
 ## Resource ownership
 

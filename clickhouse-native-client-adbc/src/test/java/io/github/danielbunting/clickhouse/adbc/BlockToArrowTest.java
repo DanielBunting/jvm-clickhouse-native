@@ -139,8 +139,9 @@ class BlockToArrowTest {
                 Arguments.of("UInt256", new ArrowType.Utf8(), false),
                 Arguments.of("BFloat16", new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), false),
                 Arguments.of("JSON", new ArrowType.Utf8(), false),
-                Arguments.of("Dynamic", new ArrowType.Utf8(), false),
-                Arguments.of("Variant(Int64, String)", new ArrowType.Utf8(), false),
+                // Variant/Dynamic hold NULL without a Nullable(...) wrapper → always nullable.
+                Arguments.of("Dynamic", new ArrowType.Utf8(), true),
+                Arguments.of("Variant(Int64, String)", new ArrowType.Utf8(), true),
                 Arguments.of("Nothing", new ArrowType.Null(), false),
                 // Time/Time64 and non-calendar Intervals → Duration; calendar Intervals → Interval(YEAR_MONTH).
                 Arguments.of("Time", new ArrowType.Duration(TimeUnit.SECOND), false),
