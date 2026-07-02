@@ -23,10 +23,15 @@ abstract class AdbcIntegrationTest {
     /** Native-TCP protocol port. */
     static final int NATIVE_PORT = 9000;
 
-    /** Users override that opens the default user to all networks (IPv4/IPv6). */
+    /**
+     * Users override that opens the default user to all networks (IPv4/IPv6) and grants it
+     * access management, so session tests can CREATE USER / ROLE / ROW POLICY via plain DDL.
+     */
     private static final String OPEN_DEFAULT_USER_XML =
             "<clickhouse><users><default><networks replace=\"replace\">"
-            + "<ip>::/0</ip></networks></default></users></clickhouse>";
+            + "<ip>::/0</ip></networks>"
+            + "<access_management>1</access_management>"
+            + "</default></users></clickhouse>";
 
     @SuppressWarnings("resource")
     static final GenericContainer<?> CLICKHOUSE =

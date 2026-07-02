@@ -8,6 +8,7 @@ import io.github.danielbunting.clickhouse.ClickHouseConfig;
 import io.github.danielbunting.clickhouse.internal.NativeClientImpl;
 import io.github.danielbunting.clickhouse.internal.ServerMessage;
 import io.github.danielbunting.clickhouse.protocol.ServerPacket;
+import io.github.danielbunting.clickhouse.test.FaultInjectingProxy;
 import io.github.danielbunting.clickhouse.test.IntegrationTestBase;
 import java.time.Duration;
 import org.junit.jupiter.api.Tag;
