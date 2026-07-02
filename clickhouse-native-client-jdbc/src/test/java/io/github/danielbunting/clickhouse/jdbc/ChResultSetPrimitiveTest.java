@@ -298,20 +298,15 @@ class ChResultSetPrimitiveTest {
     }
 
     /**
-     * KNOWN BUG — asserts the CORRECT behavior and currently FAILS.
-     *
-     * <p>Narrowing an out-of-range WIDE integer (Int128/Int256/UInt128/UInt256, backed
-     * by BigInteger) via {@code getInt}/{@code getLong} leaks a raw
-     * {@link ArithmeticException} from {@code BigInteger.intValueExact()} instead of the
-     * JDBC-spec {@link SQLException} that the Int64 narrowing path throws (see
-     * {@code int64_getInt_outOfRangeThrows}). The exception surface must be uniform.
-     *
-     * <p>Fix approach: catch {@code ArithmeticException} in the BigInteger branch of
-     * {@code JdbcValues}' int/long narrowing and rethrow as {@code SQLException}, exactly
-     * like the long-based range check.
+     * Narrowing an out-of-range WIDE integer (Int128/Int256/UInt128/UInt256, backed
+     * by BigInteger) via {@code getInt}/{@code getLong} throws the JDBC-spec
+     * {@link SQLException}, uniform with the Int64 narrowing path (see
+     * {@code int64_getInt_outOfRangeThrows}): the BigInteger branch of
+     * {@code JdbcValues} catches the {@code ArithmeticException} and rethrows (was
+     * knownBug 34).
      */
     @org.junit.jupiter.api.Test
-    void knownBug_wideIntOverflowMustThrowSqlExceptionNotArithmetic() throws SQLException {
+    void wideIntOverflowThrowsSqlException() throws SQLException {
         java.math.BigInteger int128Max = java.math.BigInteger.TWO.pow(127)
                 .subtract(java.math.BigInteger.ONE);
         ChResultSet rs = RsFixtures.open(

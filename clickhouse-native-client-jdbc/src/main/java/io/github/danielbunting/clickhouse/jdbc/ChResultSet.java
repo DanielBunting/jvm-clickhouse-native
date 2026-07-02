@@ -49,6 +49,9 @@ final class ChResultSet implements ResultSet {
     private final List<String> columnNames;
     private final Iterator<Block> blocks;
 
+    /** The statement that produced this result set, or {@code null} when detached. */
+    private final ChStatement statement;
+
     private Block currentBlock;
     private int rowInBlock = -1;
     private boolean closed;
@@ -56,15 +59,29 @@ final class ChResultSet implements ResultSet {
     private boolean afterLast;
 
     /**
-     * Wraps a core {@link QueryResult}. The block iterator is pulled lazily; no
-     * data is read until {@link #next()} is first called.
+     * Wraps a core {@link QueryResult} with no producing statement (metadata and other
+     * statement-free producers). The block iterator is pulled lazily; no data is read
+     * until {@link #next()} is first called.
      *
      * @param result the core query result to expose; must not be {@code null}
      */
     ChResultSet(QueryResult result) {
+        this(result, null);
+    }
+
+    /**
+     * Wraps a core {@link QueryResult} produced by a statement, so
+     * {@link #getStatement()} can honor the JDBC contract and {@link #close()} can
+     * notify the statement for {@code closeOnCompletion}.
+     *
+     * @param result    the core query result to expose; must not be {@code null}
+     * @param statement the producing statement; may be {@code null} for detached results
+     */
+    ChResultSet(QueryResult result, ChStatement statement) {
         this.result = result;
         this.columnNames = result.columnNames();
         this.blocks = result.blocks();
+        this.statement = statement;
     }
 
     // -----------------------------------------------------------------------
@@ -114,6 +131,9 @@ final class ChResultSet implements ResultSet {
             closed = true;
             currentBlock = null;
             result.close();
+            if (statement != null) {
+                statement.resultSetClosed(this);
+            }
         }
     }
 
@@ -462,7 +482,7 @@ final class ChResultSet implements ResultSet {
 
     @Override
     public Statement getStatement() {
-        return null;
+        return statement;
     }
 
     @Override
@@ -493,8 +513,11 @@ final class ChResultSet implements ResultSet {
     }
 
     @Override
-    public void setFetchSize(int rows) {
-        // hint ignored; blocks are server-sized
+    public void setFetchSize(int rows) throws SQLException {
+        if (rows < 0) {
+            throw new SQLException("fetchSize must be >= 0");
+        }
+        // positive hint ignored; blocks are server-sized
     }
 
     @Override

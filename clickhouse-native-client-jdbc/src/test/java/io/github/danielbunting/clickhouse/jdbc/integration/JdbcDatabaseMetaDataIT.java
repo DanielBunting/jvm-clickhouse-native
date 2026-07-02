@@ -313,10 +313,9 @@ class JdbcDatabaseMetaDataIT {
                 {"c10", "DateTime64(5)"},
                 {"c11", "Enum8('a' = 1, 'b' = 2)"},
             };
-            // The c2 (UInt128) DATA_TYPE is intentionally NOT asserted here: getColumns
-            // currently reports DECIMAL while ChResultSetMetaData reports NUMERIC for the
-            // same column — asserted as a bug (expecting NUMERIC) by
-            // knownBug_wideIntDataTypeMustBeConsistentAcrossMetadataSurfaces.
+            // The c2 (UInt128) DATA_TYPE is not asserted here: the wide-int mapping
+            // (NUMERIC, consistent across metadata surfaces) is covered by
+            // wideIntDataTypeIsConsistentAcrossMetadataSurfaces.
             int[] expectedJdbc = {Types.BIGINT, Integer.MIN_VALUE, Types.VARCHAR, Types.REAL,
                     Types.VARCHAR, Types.DECIMAL, Types.DECIMAL, Types.DATE,
                     Types.TIMESTAMP, Types.TIMESTAMP, Types.VARCHAR};
@@ -390,8 +389,7 @@ class JdbcDatabaseMetaDataIT {
                     row.put("RADIX", rs.getInt("NUM_PREC_RADIX"));
                     byName.put(name, row);
 
-                    // Global DATA_TYPE ordering is asserted (and currently failing) in
-                    // knownBug_getTypeInfoMustBeSortedByDataType.
+                    // Global DATA_TYPE ordering is asserted in getTypeInfoIsSortedByDataType.
 
                     assertEquals(DatabaseMetaData.typeNullable, rs.getShort("NULLABLE"),
                             name + ": every CH type is Nullable-wrappable");
@@ -437,24 +435,13 @@ class JdbcDatabaseMetaDataIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (JDBC spec for {@link DatabaseMetaData#getTypeInfo()}: "They are
-     * ordered by DATA_TYPE"): walking the result set yields globally non-decreasing
-     * DATA_TYPE values. Actual: {@code ChDatabaseMetaData.getTypeInfo} builds a
-     * {@code SELECT ... UNION ALL SELECT ... ORDER BY DATA_TYPE} statement, and in
-     * ClickHouse an ORDER BY after a UNION ALL chain binds only to the <em>last</em>
-     * SELECT, so the rows come back in whatever (nondeterministic, parallel-union)
-     * order the server produces them — observed e.g. Int8 = TINYINT(-6) following
-     * UInt8 = SMALLINT(5) — which is not sorted.
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChDatabaseMetaData.java},
-     * method {@code getTypeInfo()}, wrap the union chain in a subselect so the ORDER BY
-     * applies globally: {@code SELECT * FROM (<union all chain>) ORDER BY DATA_TYPE}.
+     * {@link DatabaseMetaData#getTypeInfo()} is globally ordered by DATA_TYPE, per
+     * the JDBC spec: the union chain is wrapped in a subselect so the ORDER BY
+     * applies to the whole result rather than (as ClickHouse binds a bare ORDER BY
+     * after UNION ALL) only the last SELECT (was knownBug 30).
      */
     @Test
-    void knownBug_getTypeInfoMustBeSortedByDataType() throws Exception {
+    void getTypeInfoIsSortedByDataType() throws Exception {
         try (Connection conn = connect();
                 ResultSet rs = conn.getMetaData().getTypeInfo()) {
             int previous = Integer.MIN_VALUE;
@@ -473,25 +460,15 @@ class JdbcDatabaseMetaDataIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected: the two metadata surfaces agree on the JDBC type of a wide-integer
-     * column — {@code getColumns().DATA_TYPE} for an {@code Int128}/{@code UInt256}
-     * column equals {@code ResultSetMetaData.getColumnType} for the same column, namely
-     * {@link Types#NUMERIC} (the jdbc-v2 mapping; the value range demands an unscaled
-     * BigInteger-backed NUMERIC, not DECIMAL). Actual: {@code ChResultSetMetaData} goes
-     * through {@code JdbcValues.sqlType}, which maps Int128/UInt128/Int256/UInt256 to
-     * NUMERIC(2), while the {@code multiIf} in {@code ChDatabaseMetaData.getColumns}
-     * maps the same family to DECIMAL(3).
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChDatabaseMetaData.java},
-     * method {@code dataTypeCaseExpr()} (used by {@code getColumns}), change the branch
-     * {@code base IN ('Int128','UInt128','Int256','UInt256') -> Types.DECIMAL} to
-     * {@code Types.NUMERIC}, aligning it with {@code JdbcValues.sqlType}.
+     * The two metadata surfaces agree on the JDBC type of a wide-integer column:
+     * {@code getColumns().DATA_TYPE} for an {@code Int128}/{@code UInt256} column
+     * equals {@code ResultSetMetaData.getColumnType}, namely {@link Types#NUMERIC} —
+     * the {@code multiIf} in {@code ChDatabaseMetaData.getColumns} is aligned with
+     * {@code JdbcValues.sqlType} (was knownBug 31; the jdbc-v2 mapping: the value
+     * range demands an unscaled BigInteger-backed NUMERIC, not DECIMAL).
      */
     @Test
-    void knownBug_wideIntDataTypeMustBeConsistentAcrossMetadataSurfaces() throws Exception {
+    void wideIntDataTypeIsConsistentAcrossMetadataSurfaces() throws Exception {
         try (Connection conn = connect()) {
             try (Statement st = conn.createStatement()) {
                 st.execute("DROP TABLE IF EXISTS md_wide_int");
@@ -583,7 +560,7 @@ class JdbcDatabaseMetaDataIT {
      * Server version metadata matches the live server's {@code version()} (reference:
      * jdbc-v2 DatabaseMetaDataTest#testGetServerVersions / testGetDatabaseMajorVersion /
      * testGetDatabaseMinorVersion). ({@code getUserName()} is asserted separately by
-     * {@link #knownBug_getUserNameMustReturnAuthenticatedUser()}.)
+     * {@link #getUserNameReturnsAuthenticatedUser()}.)
      */
     @Test
     void serverVersionMetadataMatchesLiveServer() throws Exception {
@@ -609,23 +586,13 @@ class JdbcDatabaseMetaDataIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (JDBC spec, jdbc-v2 {@code DatabaseMetaDataTest#testGetUserName}):
-     * {@code DatabaseMetaData.getUserName()} returns the user the session authenticated
-     * as — here {@code "default"}. Actual: {@code ChDatabaseMetaData.getUserName} reads
-     * {@code conn.getClientInfo("user")}, which nothing ever populates, so it returns
-     * {@code null}.
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChDatabaseMetaData.java},
-     * method {@code getUserName()}, either (a) populate the {@code "user"} client-info
-     * key from the connection's configured credentials when {@code ChConnection} is
-     * constructed, or (b) query the server directly ({@code SELECT currentUser()}) and
-     * return that value.
+     * {@code DatabaseMetaData.getUserName()} returns the user the session
+     * authenticated as: it queries {@code SELECT currentUser()}, so the answer is
+     * right regardless of how the credentials were supplied (was knownBug 29; JDBC
+     * spec, jdbc-v2 {@code DatabaseMetaDataTest#testGetUserName}).
      */
     @Test
-    void knownBug_getUserNameMustReturnAuthenticatedUser() throws Exception {
+    void getUserNameReturnsAuthenticatedUser() throws Exception {
         try (Connection conn = connect()) {
             assertEquals("default", conn.getMetaData().getUserName(),
                     "getUserName must report the authenticated user");

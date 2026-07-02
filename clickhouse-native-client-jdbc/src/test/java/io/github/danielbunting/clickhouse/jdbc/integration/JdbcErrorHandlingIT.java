@@ -116,9 +116,9 @@ class JdbcErrorHandlingIT {
      * <p>The server normally sends Progress packets every ~100ms while a query runs,
      * which keeps the socket alive, so the test stretches {@code interactive_delay}
      * beyond the sleep to make the connection genuinely idle. The thrown type is
-     * asserted loosely ({@code Exception}) because mid-stream failures currently leak
-     * core exceptions instead of {@code SQLException} — that defect is documented by
-     * {@code JdbcStatementIT#knownBug_midStreamServerErrorSurfacesAsSqlException}.
+     * asserted loosely ({@code Exception}) to keep this test focused on the timeout
+     * cause; the mid-stream exception TYPE is covered by
+     * {@code JdbcStatementIT#midStreamServerErrorSurfacesAsSqlException}.
      */
     @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -149,24 +149,14 @@ class JdbcErrorHandlingIT {
     }
 
     /**
-     * KNOWN BUG (failing on purpose — ported from jdbc-v2
-     * {@code JDBCErrorHandlingTests#testServerErrorCodePropagatedToSQLException}):
-     * {@link SQLException#getErrorCode()} must carry the server's error code
-     * (here UNKNOWN_DATABASE = 81), per the JDBC vendor-code contract.
-     *
-     * <p>Actual: the code is 0. The core {@code ServerException} in the cause chain
-     * DOES carry 81 (asserted first, proving this failure is exactly the propagation
-     * bug and not a missing server error), but {@code ChStatement.wrap(RuntimeException)}
-     * builds {@code new SQLException(e.getMessage(), e)}, discarding it.
-     *
-     * <p>HOW TO FIX: in {@code ChStatement.wrap} (src/main/java/.../jdbc/ChStatement.java),
-     * when the cause chain contains a {@code ServerException se}, construct
-     * {@code new SQLException(e.getMessage(), null, se.code(), e)} (and consider the same
-     * for {@code ChPreparedStatement}/{@code ChConnection} wrap sites) so
-     * {@code getErrorCode()} reports the ClickHouse error code.
+     * {@link SQLException#getErrorCode()} carries the server's error code (here
+     * UNKNOWN_DATABASE = 81), per the JDBC vendor-code contract:
+     * {@code ChStatement.wrap} propagates {@code ServerException.code()} into the
+     * SQLException it builds (was knownBug 1; ported from jdbc-v2
+     * {@code JDBCErrorHandlingTests#testServerErrorCodePropagatedToSQLException}).
      */
     @Test
-    void knownBug_serverErrorCodePropagatedToSqlExceptionGetErrorCode() throws Exception {
+    void serverErrorCodePropagatedToSqlExceptionGetErrorCode() throws Exception {
         try (Connection conn = connect(); Statement st = conn.createStatement()) {
             SQLException e = assertThrows(SQLException.class,
                     () -> st.executeQuery("SELECT * FROM no_such_db_xyz.unknown_table"));

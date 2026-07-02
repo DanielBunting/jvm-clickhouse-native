@@ -360,9 +360,10 @@ class JdbcSessionIT {
             st.execute("CREATE DATABASE " + database);
         }
         try (Connection conn = connect()) {
-            // The URL database lives in the URL path, not the "database" property, so
-            // ChConnection derives no initial schema value.
-            assertNull(conn.getSchema(), "schema is unset when the database came from the URL");
+            // The initial schema derives from the database in the URL path (was null
+            // before the bug-24 fix made ChConnection fall back to the URL path).
+            assertEquals("default", conn.getSchema(),
+                    "schema derives from the URL-path database");
 
             conn.setSchema(database);
             assertEquals(database, conn.getSchema(), "setSchema stores the value");
@@ -610,8 +611,8 @@ class JdbcSessionIT {
                         url() + "?settings.max_result_rows=5");
                 Statement st = conn.createStatement()) {
             // Asserting Exception (not SQLException) keeps this test focused on the
-            // setting-enforcement dimension; the exception TYPE defect is documented
-            // separately by knownBug_deferredServerErrorMustSurfaceAsSqlException.
+            // setting-enforcement dimension; the exception TYPE is covered
+            // separately by deferredServerErrorSurfacesAsSqlException.
             Exception e = assertThrows(Exception.class, () -> {
                 try (ResultSet rs = st.executeQuery(
                         "SELECT toInt32(number) FROM system.numbers LIMIT 20")) {
@@ -749,33 +750,16 @@ class JdbcSessionIT {
     }
 
     /**
-     * KNOWN BUG (expected failure, documents the defect): a no-arg
-     * {@code getConnection()} must authenticate with the credentials supplied to the
-     * DataSource constructor (jdbc-v2 DataSourceTest#testGetConnectionWithUserAndPassword
-     * semantics; also the {@code javax.sql.DataSource} contract — the DataSource holds
-     * the configuration).
-     *
-     * <p>Actual behavior today: it connects as {@code default}. Two defects conspire in
-     * the delegation chain
-     * ({@code ChDataSource.getConnection()} →
-     * clickhouse-native-client-jdbc/src/main/java/io/github/danielbunting/clickhouse/jdbc/ChDataSource.java):
-     * {@code getConnection()} passes {@code new Properties(properties)}, which stores
-     * the configured entries only as <em>defaults</em> of an empty table, and
-     * {@code ClickHouseConfig.fromUrl(url, info)}
-     * (clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt)
-     * short-circuits on {@code info.isEmpty} — {@code Hashtable.isEmpty()} ignores
-     * defaults — so the user/password never reach the config.
-     *
-     * <p>How to fix (either suffices; the first is safest): in
-     * {@code ChDataSource.getConnection()}, copy the entries for real —
-     * {@code Properties copy = new Properties(); copy.putAll(properties);} — instead of
-     * wrapping them as defaults; and/or in {@code ClickHouseConfig.fromUrl(url, info)}
-     * drop the {@code info.isEmpty} short-circuit and rely on
-     * {@code getProperty(...)} (which does consult defaults) returning null. This test
-     * passes once fixed.
+     * A no-arg {@code getConnection()} authenticates with the credentials supplied to
+     * the DataSource constructor: {@code ChDataSource} copies the configured entries
+     * for real ({@code putAll}, not the defaults-only {@code new Properties(defaults)}
+     * wrapper), and {@code ClickHouseConfig.fromUrl(url, info)} no longer
+     * short-circuits on {@code info.isEmpty} — which ignores Properties defaults (was
+     * knownBug 21; jdbc-v2 DataSourceTest#testGetConnectionWithUserAndPassword
+     * semantics, and the {@code javax.sql.DataSource} contract).
      */
     @Test
-    void knownBug_dataSourceGetConnectionMustUseConstructorProperties() throws Exception {
+    void dataSourceGetConnectionUsesConstructorProperties() throws Exception {
         createDataSourceUser();
 
         Properties props = new Properties();

@@ -290,11 +290,9 @@ class JdbcPreparedStatementExtrasIT {
      * A user-written multi-row {@code VALUES (?, ?), (?, ?)} binds parameters across
      * tuples in placeholder order, including a NULL for a Nullable column.
      *
-     * <p>The NULL binding is exercised on the client-side path only: with
-     * {@code server_side_params=true} every placeholder is declared {@code {_pN:String}}
-     * (non-Nullable), so the server rejects the NULL sentinel with
-     * "Cannot parse quoted string: expected opening quote ''', got 'N'" — asserted as a
-     * bug by {@link #knownBug_nullBindingMustWorkWithServerSideParams()}.
+     * <p>The NULL binding is exercised on the client-side path only here; the
+     * server-side NULL round-trip is covered by
+     * {@link #nullBindingWorksWithServerSideParams()}.
      */
     private void insertWithMultipleValues(boolean serverSide) throws Exception {
         String table = "pstmt_multi_values_" + mode(serverSide);
@@ -339,29 +337,16 @@ class JdbcPreparedStatementExtrasIT {
     }
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (JDBC spec / jdbc-v2 {@code PreparedStatementTest}): binding SQL NULL
-     * (via {@code setNull} or a null {@code setString}) works regardless of the binding
-     * mode, so an INSERT of NULL into a {@code Nullable(String)} column round-trips with
-     * {@code server_side_params=true} exactly as it does client-side. Actual:
-     * {@code ChPreparedStatement.rewriteToNamedParams} declares every placeholder as the
-     * non-Nullable {@code {_pN:String}}, so when the null binding travels as the
-     * {@code \N} sentinel the server rejects it with "Cannot parse quoted string:
-     * expected opening quote ''', got 'N'" and {@code executeUpdate} throws.
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChPreparedStatement.java},
-     * method {@code rewriteToNamedParams}, declare the placeholders as
-     * {@code {_pN:Nullable(String)}} so the server accepts the {@code \N} sentinel
-     * (verify the server accepts Nullable-typed query parameters in the target contexts —
-     * ClickHouse supports Nullable param types for scalar expressions; contexts that
-     * reject them, e.g. identifiers, already fail today). Alternatively, fall back to
-     * client-side interpolation in {@code executeQuery}/{@code executeUpdate} when any
-     * bound value is null.
+     * Binding SQL NULL (via {@code setNull} or a null {@code setString}) works with
+     * {@code server_side_params=true} exactly as it does client-side (was knownBug 19;
+     * JDBC spec / jdbc-v2 {@code PreparedStatementTest}). Two fixes combine: a
+     * null-bound placeholder is declared {@code {_pN:Nullable(String)}} at execution
+     * time so the {@code \N} sentinel means NULL, and the wire layer dumps the
+     * sentinel as the quoted STRING {@code '\N'} (what clickhouse-client sends)
+     * instead of a bare {@code NULL} Field token, which the VALUES parser rejected.
      */
     @Test
-    void knownBug_nullBindingMustWorkWithServerSideParams() throws Exception {
+    void nullBindingWorksWithServerSideParams() throws Exception {
         String table = "pstmt_null_bind_srv";
         try (Connection conn = connect(true)) {
             try (Statement st = conn.createStatement()) {
@@ -655,9 +640,8 @@ class JdbcPreparedStatementExtrasIT {
     /**
      * {@code setBytes} binds into FixedString and Nullable(String) columns and works
      * as a WHERE predicate against a FixedString column. The NULL binding for the
-     * Nullable column is client-side only (server-side {_pN:String} placeholders are
-     * non-Nullable — asserted as a bug by
-     * {@link #knownBug_nullBindingMustWorkWithServerSideParams()}).
+     * Nullable column is exercised client-side here; the server-side NULL round-trip
+     * is covered by {@link #nullBindingWorksWithServerSideParams()}.
      */
     private void setBytesFixedStringMatrix(boolean serverSide) throws Exception {
         String table = "pstmt_fixed_bytes_" + mode(serverSide);

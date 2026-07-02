@@ -275,25 +275,13 @@ class ChPreparedStatementBindingTest {
     // ---- quoted identifiers in substitution (jdbc-v2 testReplaceQuestionMark) --------
 
     /**
-     * KNOWN BUG — this test asserts the CORRECT behavior and fails until fixed.
-     *
-     * <p>Expected (jdbc-v2 {@code PreparedStatementImpl.replaceQuestionMarks}): a
-     * {@code ?} inside a backtick- or double-quoted identifier is not a parameter, so
-     * only the final {@code ?} substitutes and the identifiers stay verbatim. Actual:
-     * the scanner in {@code ChPreparedStatement} only tracks single-quoted string
-     * literals, so it rewrites the {@code ?} inside {@code `v2?`} and {@code `v1?`},
-     * corrupting the identifiers (and consuming bindings in the wrong positions).
-     *
-     * <p>HOW TO FIX: in
-     * {@code src/main/java/io/github/danielbunting/clickhouse/jdbc/ChPreparedStatement.java},
-     * extend the shared scanning loop used by {@code countPlaceholders},
-     * {@code substitute} and {@code rewriteToNamedParams} to also track backtick
-     * ({@code `}) and double-quote ({@code "}) identifier state exactly like the
-     * existing {@code inString} flag (including the doubled-quote escape, e.g.
-     * {@code `v?``1`}), and treat {@code ?} as text while inside either.
+     * A {@code ?} inside a backtick- or double-quoted identifier is not a parameter:
+     * the shared scanner tracks identifier-quote state like string-literal state, so
+     * only the final {@code ?} substitutes and the identifiers stay verbatim (was
+     * knownBug 12; jdbc-v2 {@code PreparedStatementImpl.replaceQuestionMarks}).
      */
     @Test
-    void knownBug_substituteMustNotReplacePlaceholdersInsideQuotedIdentifiers()
+    void substituteDoesNotReplacePlaceholdersInsideQuotedIdentifiers()
             throws SQLException {
         assertEquals("SELECT `v2?` FROM t WHERE `v1?` = 3",
                 ChPreparedStatement.substitute(

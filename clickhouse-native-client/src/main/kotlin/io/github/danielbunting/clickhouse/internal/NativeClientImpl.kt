@@ -794,14 +794,17 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
         }
 
         /**
-         * Renders a query-parameter wire value as a ClickHouse Field dump: the `\N` NULL
-         * sentinel becomes the bare token `NULL`; any other value becomes a single-quoted
-         * String-Field literal with `\\` and `'` escaped (FieldVisitorDump form).
+         * Renders a query-parameter wire value as a ClickHouse Field dump: a
+         * single-quoted String-Field literal with `\\` and `'` escaped
+         * (FieldVisitorDump form). The `\N` NULL sentinel is dumped like any other
+         * string (`'\\N'`) — exactly what clickhouse-client sends for
+         * `--param_x='\N'` — because the server's parameter substitution parses the
+         * restored STRING per the placeholder type, where `\N` means NULL for a
+         * `Nullable(T)`. A bare `NULL` Field token is rejected in contexts that parse
+         * the value as quoted text (e.g. `INSERT ... VALUES`), with
+         * "Cannot parse quoted string" (verified on a live 25.8 server).
          */
         private fun dumpFieldValue(value: String?): String {
-            if ("\\N" == value) {
-                return "NULL"
-            }
             return "'" + value!!.replace("\\", "\\\\").replace("'", "\\'") + "'"
         }
 

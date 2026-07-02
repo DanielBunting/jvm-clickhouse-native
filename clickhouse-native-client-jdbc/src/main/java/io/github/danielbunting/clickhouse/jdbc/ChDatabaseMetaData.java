@@ -182,7 +182,12 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
 
     @Override
     public String getUserName() throws SQLException {
-        return conn.getClientInfo("user");
+        // Ask the server: currentUser() reports whoever the session authenticated as,
+        // regardless of how the credentials were supplied (URL, Properties, DataSource).
+        try (java.sql.Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT currentUser()")) {
+            return rs.next() ? rs.getString(1) : null;
+        }
     }
 
     @Override
@@ -1091,7 +1096,7 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
                 + base + " = 'Int8', " + Types.TINYINT + ", "
                 + base + " = 'Int32', " + Types.INTEGER + ", "
                 + base + " IN ('UInt32','Int64','UInt64'), " + Types.BIGINT + ", "
-                + base + " IN ('Int128','UInt128','Int256','UInt256'), " + Types.DECIMAL + ", "
+                + base + " IN ('Int128','UInt128','Int256','UInt256'), " + Types.NUMERIC + ", "
                 + base + " = 'Float32', " + Types.REAL + ", "
                 + base + " = 'Float64', " + Types.DOUBLE + ", "
                 + base + " = 'String', " + Types.VARCHAR + ", "
@@ -1236,6 +1241,10 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
             {"Enum16", Types.VARCHAR, 0, 0, 0},
             {"Array", Types.ARRAY, 0, 0, 0},
         };
+        // The union chain is wrapped in a subselect below: in ClickHouse an ORDER BY
+        // after a UNION ALL binds only to the last SELECT, so a bare ORDER BY would
+        // leave the overall row order nondeterministic.
+        sql.append("SELECT * FROM (");
         for (int i = 0; i < rows.length; i++) {
             Object[] r = rows[i];
             String name = (String) r[0];
@@ -1268,7 +1277,7 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
                .append("CAST(NULL AS Nullable(Int32)) AS SQL_DATETIME_SUB, ")
                .append("toInt32(").append(radix).append(") AS NUM_PREC_RADIX");
         }
-        sql.append(" ORDER BY DATA_TYPE");
+        sql.append(") ORDER BY DATA_TYPE");
         return runMeta(sql.toString());
     }
 

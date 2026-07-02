@@ -480,9 +480,8 @@ class JdbcStatementIT {
         }
 
         // Default overflow mode (throw): the server rejects with TOO_MANY_ROWS (396).
-        // The error arrives MID-STREAM, and this driver currently leaks it as a raw
-        // core exception rather than an SQLException — the type defect is documented by
-        // knownBug_midStreamServerErrorSurfacesAsSqlException below; here we only prove
+        // The error arrives MID-STREAM; the exception type is covered by
+        // midStreamServerErrorSurfacesAsSqlException below — here we only prove
         // the server-side setting is enforced and its code reaches the caller.
         try (Connection conn = DriverManager.getConnection(url()
                 + "?settings.max_result_rows=1000");
@@ -891,9 +890,9 @@ class JdbcStatementIT {
     @Test
     void setCatalogIsStorageOnlyAndUseIsNotTracked() throws Exception {
         try (Connection conn = connect()) {
-            // The URL carries the database in the path, not the "database" property, so
-            // the initial catalog is unset.
-            assertNull(conn.getCatalog());
+            // The initial catalog derives from the database in the URL path (was null
+            // before the bug-24 fix made ChConnection fall back to the URL path).
+            assertEquals("default", conn.getCatalog());
 
             conn.setCatalog("system");
             assertEquals("system", conn.getCatalog(), "setCatalog stores the value");

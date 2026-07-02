@@ -121,22 +121,13 @@ class ChStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): per the jdbc-v2 matrix
-     * (BaseSqlParserFacadeTest#testStatementsForResultSet and the CTE suite), EXPLAIN
-     * and CHECK statements and parenthesized SELECT/WITH queries all produce result
-     * sets.
-     *
-     * <p>Expected: {@code producesResultSet} returns {@code true} for every statement
-     * below. Actual: the prefix classifier does not recognise these forms and returns
-     * {@code false}, routing them to the update path.
-     *
-     * <p>Fix: in {@link ChStatement#producesResultSet} (ChStatement.java), add
-     * {@code EXPLAIN} and {@code CHECK} to the recognised keyword prefixes, and skip
-     * any leading {@code '('} characters (after whitespace/comments) before sniffing
-     * the keyword so parenthesized queries classify by their inner keyword.
+     * EXPLAIN and CHECK statements and parenthesized SELECT/WITH queries all classify
+     * as result-producing: the classifier recognises both keywords and skips leading
+     * {@code '('} characters before sniffing (was knownBug 10; per the jdbc-v2 matrix,
+     * BaseSqlParserFacadeTest#testStatementsForResultSet and the CTE suite).
      */
     @Test
-    void knownBug_producesResultSetMisclassifiesExplainCheckAndParenthesizedQueries() {
+    void producesResultSet_classifiesExplainCheckAndParenthesizedQueries() {
         assertTrue(ChStatement.producesResultSet("EXPLAIN SELECT 1"));
         assertTrue(ChStatement.producesResultSet("EXPLAIN AST SELECT 1"));
         assertTrue(ChStatement.producesResultSet(
@@ -168,21 +159,13 @@ class ChStatementTest {
     // jdbc-v2 StatementTest#testNewLineSQLParsing) -----------------------------
 
     /**
-     * KNOWN BUG (fails until fixed): {@code producesResultSet} sniffs the first
-     * keyword after stripping leading <em>whitespace only</em>, so SQL that begins
-     * with a {@code --}/{@code #}/{@code #!} line comment is misclassified as
-     * non-result-producing.
-     *
-     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): every line-comment-
-     * prefixed query below classifies {@code true}. Actual: {@code false}.
-     *
-     * <p>Fix: in {@link ChStatement#producesResultSet} (ChStatement.java), before the
-     * keyword sniff, loop skipping leading whitespace and {@code --}/{@code #}/
-     * {@code #!} line comments (up to and including the next {@code \n}) until real
-     * SQL text is reached.
+     * SQL beginning with a {@code --}/{@code #}/{@code #!} line comment classifies by
+     * the first keyword after the comments: {@code producesResultSet} skips leading
+     * whitespace and line comments before sniffing (was knownBug 9; jdbc-v2
+     * StatementTest#testNewLineSQLParsing).
      */
     @Test
-    void knownBug_producesResultSet_lineCommentPrefixHidesKeyword() {
+    void producesResultSet_lineCommentPrefixSkipped() {
         assertTrue(ChStatement.producesResultSet("-- comment\nSELECT 1"));
         assertTrue(ChStatement.producesResultSet(
                 "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;"));
@@ -193,20 +176,13 @@ class ChStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): companion to the line-comment case — SQL that
-     * begins with a {@code /* *}{@code /} block comment (ClickHouse block comments
-     * nest) is misclassified as non-result-producing.
-     *
-     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): every block-comment-
-     * prefixed query below classifies {@code true}. Actual: {@code false}.
-     *
-     * <p>Fix: same place as the line-comment fix — in
-     * {@link ChStatement#producesResultSet} (ChStatement.java), skip leading
-     * {@code /* *}{@code /} blocks with a nesting-depth counter before sniffing the
-     * keyword.
+     * Companion to the line-comment case — SQL beginning with a {@code /* *}{@code /}
+     * block comment (ClickHouse block comments nest) classifies by the keyword after
+     * the comment: the classifier skips blocks with a nesting-depth counter (was
+     * knownBug 9; jdbc-v2 StatementTest#testNewLineSQLParsing).
      */
     @Test
-    void knownBug_producesResultSet_blockCommentPrefixHidesKeyword() {
+    void producesResultSet_blockCommentPrefixSkipped() {
         assertTrue(ChStatement.producesResultSet("/* c */ SELECT 1"));
         assertTrue(ChStatement.producesResultSet("/* outer /* nested */ still comment */ SELECT 1"));
         assertTrue(ChStatement.producesResultSet("\n\t /* c */\n-- more\nSHOW TABLES"));
@@ -355,21 +331,13 @@ class ChStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): because {@code producesResultSet} does not skip
-     * leading comments, {@code execute()} sends a comment-prefixed SELECT down the
-     * <em>update</em> path ({@code core().execute}) and reports no result set.
-     *
-     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): {@code execute()}
-     * returns {@code true} and the SQL is routed to {@code core().query}. Actual:
-     * returns {@code false} and the SQL goes to {@code core().execute}.
-     *
-     * <p>Fix: same as the classification bug — make
-     * {@link ChStatement#producesResultSet} (ChStatement.java) skip leading
-     * whitespace, line comments, and nested block comments before keyword sniffing;
-     * {@code execute(String)} then routes correctly with no further change.
+     * {@code execute()} on a comment-prefixed SELECT reports a result set and routes
+     * to {@code core().query} — the comment-skipping classifier makes the routing
+     * decision on the first real keyword (was knownBug 9; jdbc-v2
+     * StatementTest#testNewLineSQLParsing).
      */
     @Test
-    void knownBug_executeRoutesCommentPrefixedSelectToUpdatePath() throws SQLException {
+    void executeRoutesCommentPrefixedSelectToQueryPath() throws SQLException {
         RecordingCore core = new RecordingCore();
         ChStatement s = connected(core);
         String sql = "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;";

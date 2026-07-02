@@ -147,25 +147,14 @@ final class ClickHouseConfigFromUrlTest {
     }
 
     /**
-     * KNOWN BUG (expected failure, documents the defect): a percent-encoded colon in
-     * the USERNAME ({@code let%3Ame}) must decode into the username — RFC 3986 reserves
-     * only the <em>literal</em> colon as the user/password separator, and the reference
-     * parser (v1 ClickHouseJdbcUrlParserTest#testParseCredentials) yields username
-     * {@code "let:me"} for {@code let%3Ame}.
-     *
-     * <p>Actual behavior today: {@code ClickHouseConfig.fromUrl} (companion object in
-     * {@code clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt})
-     * reads {@code uri.userInfo}, which is already percent-DECODED, and then splits at
-     * the first colon — so the decoded {@code %3A} is mis-treated as the separator,
-     * producing username {@code "let"} and password {@code "me:pw"}.
-     *
-     * <p>How to fix: in {@code fromUrl}, use {@code uri.rawUserInfo} instead, split it
-     * at the first literal {@code ':'}, then percent-decode the user and password parts
-     * separately (e.g. {@code URLDecoder.decode(part, StandardCharsets.UTF_8)}). This
-     * test passes once that is done.
+     * A percent-encoded colon in the USERNAME ({@code let%3Ame}) decodes into the
+     * username — RFC 3986 reserves only the <em>literal</em> colon as the
+     * user/password separator: {@code fromUrl} splits the RAW userinfo at the first
+     * literal {@code ':'} and percent-decodes each part separately (was knownBug 22;
+     * reference: v1 ClickHouseJdbcUrlParserTest#testParseCredentials).
      */
     @Test
-    void knownBug_percentEncodedColonInUsername_shouldDecodeIntoUsername() {
+    void percentEncodedColonInUsername_decodedIntoUsername() {
         ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://let%3Ame:pw@host/db");
 
         assertEquals("let:me", cfg.username());
@@ -222,30 +211,18 @@ final class ClickHouseConfigFromUrlTest {
     }
 
     /**
-     * KNOWN BUG (expected failure, documents the defect): credentials in a URL whose
-     * host contains an underscore must still be parsed. The reference client had this
-     * exact class of bug (client-v2 ClientBuilderTest#testAddEndpointToleratesUnderscoreHostname):
-     * {@code java.net.URI} refuses to server-parse an authority whose hostname contains
-     * {@code '_'}, falls back to a REGISTRY-based authority, and then returns {@code null}
-     * from {@code getUserInfo()} (and {@code getHost()}/{@code getPort()}).
-     *
-     * <p>Actual behavior today: {@code ClickHouseConfig.fromUrl} (companion object in
-     * {@code clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt})
-     * extracts host/port with its own authority parser (so they survive), but reads the
-     * credentials from {@code uri.userInfo} — which is {@code null} here — so the username
-     * and password are SILENTLY DROPPED and the defaults ({@code "default"} / {@code ""})
-     * are used. Verified: {@code new URI("http://alice:pw@host_with_underscore:9000/db").getUserInfo()}
-     * returns {@code null} while the same URL with a plain host returns {@code "alice:pw"}.
-     *
-     * <p>How to fix: in {@code fromUrl}, stop relying on {@code uri.userInfo}. The
-     * authority text is already isolated by {@code extractHostList}'s logic — take the
-     * substring before the last literal {@code '@'} (if any) of the raw authority, split
-     * it at the first literal {@code ':'}, and percent-decode user and password separately
-     * (which also fixes {@link #knownBug_percentEncodedColonInUsername_shouldDecodeIntoUsername}).
-     * This test passes once that is done.
+     * Credentials in a URL whose host contains an underscore are parsed correctly.
+     * {@code java.net.URI} refuses to server-parse such an authority (falls back to a
+     * REGISTRY-based authority and returns {@code null} from {@code getUserInfo()} —
+     * the reference client had this exact class of bug, client-v2
+     * ClientBuilderTest#testAddEndpointToleratesUnderscoreHostname), so
+     * {@code fromUrl} extracts the userinfo from the raw authority itself: the text
+     * before the last literal {@code '@'}, split at the first literal {@code ':'},
+     * each part percent-decoded (was knownBug 22, fixed together with
+     * {@link #percentEncodedColonInUsername_decodedIntoUsername}).
      */
     @Test
-    void knownBug_underscoreHostWithCredentials_shouldPreserveCredentials() {
+    void underscoreHostWithCredentials_preservesCredentials() {
         ClickHouseConfig cfg =
                 ClickHouseConfig.fromUrl("chnative://alice:s3cr3t@host_with_underscore:9000/db");
 

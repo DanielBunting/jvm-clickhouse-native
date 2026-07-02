@@ -139,23 +139,13 @@ class ChPreparedStatementTest {
     // BaseSqlParserFacadeTest INSERT_WITH_COMMENTS) ----------------------------
 
     /**
-     * KNOWN BUG (fails until fixed): the placeholder scanner only understands
-     * single-quoted string literals, so a {@code ?} inside a {@code --}/{@code #}/
-     * {@code #!} line comment or a (nesting) block comment is counted as a bindable
-     * parameter.
-     *
-     * <p>Expected (clickhouse-java reference parsers, v1 #testComments and jdbc-v2
-     * INSERT_WITH_COMMENTS): comment text is plain text — the counts asserted below.
-     * Actual: every commented {@code ?} is counted (4/6/3/1 respectively).
-     *
-     * <p>Fix: in the shared scan loop of {@link ChPreparedStatement#countPlaceholders}
-     * / {@code substitute} / {@code rewriteToNamedParams} (ChPreparedStatement.java),
-     * when not inside a string literal, consume {@code --}/{@code #}/{@code #!} line
-     * comments through end-of-line and {@code /*}-comments with a nesting-depth
-     * counter (emitting them verbatim on the rewriting paths).
+     * A {@code ?} inside a {@code --}/{@code #}/{@code #!} line comment or a
+     * (nesting) block comment is plain text, not a bindable parameter: the shared
+     * scanner consumes comments wholesale (was knownBug 13; clickhouse-java reference
+     * parsers, v1 #testComments and jdbc-v2 INSERT_WITH_COMMENTS).
      */
     @Test
-    void knownBug_countPlaceholdersCountsQuestionMarksInsideComments() {
+    void countPlaceholdersIgnoresQuestionMarksInsideComments() {
         // Only the first '?' is a parameter.
         assertEquals(1, ChPreparedStatement.countPlaceholders("select ?/* ?..? */ from x -- ?"));
         // Only the VALUES tuple counts; jdbc-v2 INSERT_WITH_COMMENTS.
@@ -173,22 +163,15 @@ class ChPreparedStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): the scanner does not recognise backtick- or
-     * double-quoted identifiers, so a {@code ?} inside a quoted identifier (legal in
-     * ClickHouse, see jdbc-v2's complex-id cases) is counted as a bindable parameter.
-     * (The substitution dimension of this bug is covered by
-     * {@code ChPreparedStatementBindingTest#knownBug_substituteMustNotReplacePlaceholdersInsideQuotedIdentifiers};
-     * this test covers counting.)
-     *
-     * <p>Expected: quoted identifiers are opaque — the counts asserted below. Actual:
-     * each case over-counts (2/2/4 respectively).
-     *
-     * <p>Fix: in the shared scan loop (ChPreparedStatement.java), track backtick and
-     * double-quote identifier state exactly like single-quote literal state
-     * (including the doubled-character escapes {@code ``} and {@code ""}).
+     * A {@code ?} inside a backtick- or double-quoted identifier (legal in
+     * ClickHouse, see jdbc-v2's complex-id cases) is opaque to the scanner, which
+     * tracks identifier-quote state like string-literal state, including the doubled
+     * escapes {@code ``} and {@code ""} (was knownBug 12/13; the substitution
+     * dimension is covered by
+     * {@code ChPreparedStatementBindingTest#substituteDoesNotReplacePlaceholdersInsideQuotedIdentifiers}).
      */
     @Test
-    void knownBug_countPlaceholdersCountsQuestionMarksInsideQuotedIdentifiers() {
+    void countPlaceholdersIgnoresQuestionMarksInsideQuotedIdentifiers() {
         // `v?1` is an identifier.
         assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT `v?1` FROM t WHERE a = ?"));
         // "v?" is an identifier.
@@ -199,20 +182,12 @@ class ChPreparedStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): substitution consumes bound values for
-     * comment-hidden placeholders.
-     *
-     * <p>Expected: comments pass through verbatim, so one binding satisfies the one
-     * real placeholder — {@code "SELECT 5 /* keep ? *}{@code / FROM t -- tail ?"} and
-     * {@code "SELECT 1 -- ?"}. Actual: the commented {@code ?}s consume bindings, so
-     * substitution throws "Missing value for parameter 2".
-     *
-     * <p>Fix: same comment-awareness in the shared scan loop of
-     * {@link ChPreparedStatement#substitute} (ChPreparedStatement.java), emitting
-     * comment text verbatim.
+     * Substitution leaves comment-hidden {@code ?} verbatim and does not consume
+     * bindings for them: one binding satisfies the one real placeholder (was
+     * knownBug 13).
      */
     @Test
-    void knownBug_substituteConsumesValuesForCommentedPlaceholders() throws SQLException {
+    void substituteLeavesCommentedPlaceholdersVerbatim() throws SQLException {
         assertEquals("SELECT 5 /* keep ? */ FROM t -- tail ?",
                 ChPreparedStatement.substitute(
                         "SELECT ? /* keep ? */ FROM t -- tail ?", new Object[] {null, 5}));
@@ -221,36 +196,23 @@ class ChPreparedStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): the server-side rewrite shares the scanner, so
-     * comment-hidden {@code ?} also become named placeholders.
-     *
-     * <p>Expected: comments are left verbatim —
-     * {@code "SELECT {_p1:String} /* ? *}{@code / -- ?\n"}. Actual:
-     * {@code "SELECT {_p1:String} /* {_p2:String} *}{@code / -- {_p3:String}\n"}.
-     *
-     * <p>Fix: same comment-awareness in
-     * {@link ChPreparedStatement#rewriteToNamedParams} (ChPreparedStatement.java).
+     * The server-side rewrite shares the comment-aware scanner, so comment-hidden
+     * {@code ?} stay verbatim and only real placeholders become {@code {_pN:String}}
+     * (was knownBug 13).
      */
     @Test
-    void knownBug_rewriteToNamedParamsRewritesCommentedPlaceholders() {
+    void rewriteToNamedParamsLeavesCommentedPlaceholdersVerbatim() {
         assertEquals("SELECT {_p1:String} /* ? */ -- ?\n",
                 ChPreparedStatement.rewriteToNamedParams("SELECT ? /* ? */ -- ?\n"));
     }
 
     /**
-     * KNOWN BUG (fails until fixed): comment-hidden {@code ?} inflates the reported
-     * parameter count and the phantom index is bindable.
-     *
-     * <p>Expected (jdbc-v2 PreparedStatementTest#testParameterCount): the count is 1
-     * and binding index 2 throws SQLException. Actual: the count is 2 and
-     * {@code setInt(2, ...)} is accepted.
-     *
-     * <p>Fix: comment-aware {@link ChPreparedStatement#countPlaceholders}
-     * (ChPreparedStatement.java); the constructor-derived {@code parameterCount} and
-     * {@code setParam} range check then follow automatically.
+     * A comment-hidden {@code ?} does not inflate the reported parameter count, and
+     * the phantom index is not bindable: the count is 1 and binding index 2 throws
+     * (was knownBug 13; jdbc-v2 PreparedStatementTest#testParameterCount).
      */
     @Test
-    void knownBug_parameterCountIncludesCommentedPlaceholders() throws SQLException {
+    void parameterCountExcludesCommentedPlaceholders() throws SQLException {
         RecordingCore core = new RecordingCore();
         ChPreparedStatement ps = new ChPreparedStatement(
                 conn(core), "-- where id = ?\nSELECT * FROM t WHERE id = ?");
@@ -390,8 +352,8 @@ class ChPreparedStatementTest {
      * Blank SQL is accepted leniently with zero parameters. Note: jdbc-v2's parser
      * rejects null/blank SQL up front; our driver performs no such validation and
      * defers any failure to execution, so this pins the lenient contract. (Passing
-     * {@code null} SQL is the separate failing
-     * {@link #knownBug_prepareStatementWithNullSqlThrowsNpeInsteadOfSqlException}.)
+     * {@code null} SQL is the separate
+     * {@link #prepareStatementWithNullSqlThrowsSqlException}.)
      */
     @Test
     void blankSqlPreparesWithZeroParameters() throws SQLException {
@@ -414,8 +376,8 @@ class ChPreparedStatementTest {
     /**
      * The generated-keys String overloads already throw on a PreparedStatement (they
      * throw on any statement — generated keys are unsupported). The plain String-arg
-     * overloads are the separate failing
-     * {@link #knownBug_plainStringArgOverloadsDoNotThrowOnPreparedStatement}.
+     * overloads are covered separately by
+     * {@link #plainStringArgOverloadsThrowOnPreparedStatement}.
      */
     @Test
     void stringArgGeneratedKeysOverloadsThrowOnPreparedStatement() {
@@ -432,24 +394,14 @@ class ChPreparedStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): JDBC spec (and jdbc-v2
-     * PreparedStatementTest#testMethodsNotAllowedToBeCalled) — the String-argument
-     * {@code execute(String)}, {@code executeQuery(String)},
+     * The String-argument {@code execute(String)}, {@code executeQuery(String)},
      * {@code executeUpdate(String)} and {@code addBatch(String)} overloads inherited
-     * from {@link java.sql.Statement} must throw {@link SQLException} when called on
-     * a {@link java.sql.PreparedStatement}.
-     *
-     * <p>Expected: each call below throws SQLException. Actual:
-     * {@code ChPreparedStatement} silently inherits {@code ChStatement}'s working
-     * implementations, so every call succeeds.
-     *
-     * <p>Fix: override the four methods in {@code ChPreparedStatement}
-     * (ChPreparedStatement.java) to throw
-     * {@code new SQLException("method not supported on a PreparedStatement")}, as
-     * jdbc-v2's PreparedStatementImpl does.
+     * from {@link java.sql.Statement} throw {@link SQLException} on a
+     * {@link java.sql.PreparedStatement}, as the JDBC spec requires (was knownBug 11;
+     * jdbc-v2 PreparedStatementTest#testMethodsNotAllowedToBeCalled).
      */
     @Test
-    void knownBug_plainStringArgOverloadsDoNotThrowOnPreparedStatement() {
+    void plainStringArgOverloadsThrowOnPreparedStatement() {
         RecordingCore core = new RecordingCore();
         ChPreparedStatement ps =
                 new ChPreparedStatement(conn(core), "SELECT * FROM t WHERE id = ?");
@@ -461,20 +413,13 @@ class ChPreparedStatementTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): {@code prepareStatement(null)} must fail with a
-     * {@link SQLException} (jdbc-v2 rejects null SQL up front with SQLException).
-     *
-     * <p>Expected: SQLException. Actual: a raw {@link NullPointerException} escapes —
-     * the {@code ChPreparedStatement} constructor calls
-     * {@code countPlaceholders(sql)} on the null without any validation.
-     *
-     * <p>Fix: null-check the SQL in the {@code ChPreparedStatement} constructor
-     * (ChPreparedStatement.java) — declaring {@code throws SQLException} — or in
-     * {@code ChConnection.prepareStatement} (ChConnection.java) before construction,
-     * throwing {@code new SQLException("SQL must not be null")}.
+     * {@code prepareStatement(null)} fails with a {@link SQLException} —
+     * {@code ChConnection.prepareStatement} rejects null SQL up front rather than
+     * letting the constructor NPE (was knownBug 5; jdbc-v2 rejects null SQL with
+     * SQLException).
      */
     @Test
-    void knownBug_prepareStatementWithNullSqlThrowsNpeInsteadOfSqlException() {
+    void prepareStatementWithNullSqlThrowsSqlException() {
         RecordingCore core = new RecordingCore();
         assertThrows(SQLException.class, () -> conn(core).prepareStatement(null));
     }

@@ -53,22 +53,13 @@ class ChConnectionTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): a connection opened with a database in the JDBC
-     * URL path but no {@code database} property must still report that database as
-     * its catalog and schema (jdbc-v2 derives them from the parsed URL).
-     *
-     * <p>Expected: {@code getCatalog()}/{@code getSchema()} return {@code "mydb"} for
-     * {@code jdbc:chnative://localhost:9000/mydb} with empty Properties. Actual: both
-     * return {@code null} — the {@code ChConnection} constructor derives them only
-     * from the {@code database} property and ignores the URL path.
-     *
-     * <p>Fix: in the {@code ChConnection} constructor (ChConnection.java), when the
-     * {@code database} property is absent, fall back to the database parsed from the
-     * URL path (reuse the driver's URL/config parsing, e.g. the same logic
-     * {@code ClickHouseDriver} uses to build the core connection).
+     * A connection opened with a database in the JDBC URL path but no
+     * {@code database} property still reports that database as its catalog and
+     * schema: the constructor falls back to the URL path when the property is absent
+     * (was knownBug 24; jdbc-v2 derives them from the parsed URL).
      */
     @Test
-    void knownBug_catalogAndSchemaIgnoreDatabaseFromUrlPath() throws SQLException {
+    void catalogAndSchemaFallBackToDatabaseFromUrlPath() throws SQLException {
         ChConnection conn = new ChConnection(
                 new FakeCore(), "jdbc:chnative://localhost:9000/mydb", new Properties());
         assertEquals("mydb", conn.getCatalog(), "catalog must come from the URL path");
@@ -503,22 +494,12 @@ class ChConnectionTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): JDBC spec — {@code setClientInfo} on a closed
-     * connection must throw {@link SQLClientInfoException} (jdbc-v2
-     * ConnectionTest#setGetClientInfoTest asserts this for both overloads).
-     *
-     * <p>Expected: both {@code setClientInfo} overloads throw
-     * SQLClientInfoException once the connection is closed. Actual: neither overload
-     * checks the closed flag, so both silently succeed.
-     *
-     * <p>Fix: in {@code ChConnection.setClientInfo(String, String)} and
-     * {@code setClientInfo(Properties)} (ChConnection.java), check {@code closed}
-     * first and throw {@code new SQLClientInfoException("Connection is closed",
-     * java.util.Collections.emptyMap())} (plain {@code checkOpen()} cannot be used
-     * because these methods may only throw SQLClientInfoException).
+     * {@code setClientInfo} on a closed connection throws
+     * {@link SQLClientInfoException} for both overloads, per the JDBC spec (was
+     * knownBug 25; jdbc-v2 ConnectionTest#setGetClientInfoTest asserts both).
      */
     @Test
-    void knownBug_setClientInfoOnClosedConnectionDoesNotThrow() throws SQLException {
+    void setClientInfoOnClosedConnectionThrows() throws SQLException {
         ChConnection conn = newConnection(new FakeCore());
         conn.close();
         assertThrows(SQLClientInfoException.class,
@@ -552,19 +533,12 @@ class ChConnectionTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): JDBC spec — {@code abort(null)} must throw
-     * {@link SQLException} for a null executor (jdbc-v2 ConnectionTest#abortTest
-     * asserts {@code abort(null)} throws).
-     *
-     * <p>Expected: SQLException, and the connection is left untouched. Actual: the
-     * executor argument is ignored entirely and the connection is silently closed.
-     *
-     * <p>Fix: in {@code ChConnection.abort(Executor)} (ChConnection.java), throw
-     * {@code new SQLException("executor must not be null")} when the executor is
-     * null before closing.
+     * {@code abort(null)} rejects the null executor with {@link SQLException} before
+     * closing anything, per the JDBC spec (was knownBug 23; jdbc-v2
+     * ConnectionTest#abortTest).
      */
     @Test
-    void knownBug_abortWithNullExecutorSilentlyCloses() {
+    void abortWithNullExecutorThrows() {
         FakeCore core = new FakeCore();
         ChConnection conn = newConnection(core);
         assertThrows(SQLException.class, () -> conn.abort(null),

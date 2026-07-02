@@ -67,8 +67,13 @@ class QueryParameterEscapingTest {
     }
 
     @Test
-    void nullBindingDumpsAsBareNullToken() throws IOException {
-        // A null value becomes the \N wire sentinel, which dumps as the bare token NULL.
-        assertEquals("NULL", dumpedValueOf(null));
+    void nullBindingDumpsAsQuotedNullSentinel() throws IOException {
+        // A null value becomes the \N wire sentinel, dumped like any other string:
+        // '\N' with the backslash doubled — matching what clickhouse-client sends for
+        // --param_x='\N'. The server parses the restored string per the placeholder
+        // type, where \N means NULL for Nullable(T). (The earlier bare NULL Field
+        // token was rejected by contexts that parse the value as quoted text, e.g.
+        // INSERT ... VALUES — was bug 19.)
+        assertEquals("'\\\\N'", dumpedValueOf(null));
     }
 }

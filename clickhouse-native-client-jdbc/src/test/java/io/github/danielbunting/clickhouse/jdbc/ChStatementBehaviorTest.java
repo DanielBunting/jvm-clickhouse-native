@@ -28,9 +28,9 @@ import org.junit.jupiter.api.Test;
  * another change), which covers classification, wrappers and the unsupported-feature matrix.
  *
  * <p>Deliberate/defensible divergences from clickhouse-java are pinned as passing tests
- * with a comment naming the reference expectation. Confirmed spec bugs are documented as
- * intentionally FAILING {@code knownBug_}-prefixed tests asserting the correct behavior,
- * each with a javadoc explaining the bug and how to fix it.
+ * with a comment naming the reference expectation. Spec bugs found during porting were
+ * documented as failing {@code knownBug_}-prefixed tests and have since been fixed
+ * (their tests now carry a "was knownBug N" note).
  */
 class ChStatementBehaviorTest {
 
@@ -166,7 +166,7 @@ class ChStatementBehaviorTest {
      * {@code ChJdbcIssuesTest#batchReuseAfterFailure}). There is also no
      * {@code continueBatchOnError} option (v1 {@code JdbcConfig.PROP_CONTINUE_BATCH}).
      * The exception's <em>type</em> is covered separately by
-     * {@link #knownBug_batchFailureShouldThrowBatchUpdateException()}.
+     * {@link #batchFailureThrowsBatchUpdateException()}.
      */
     @Test
     void batchFailureExecutesPrefixAndAutoClears() throws SQLException {
@@ -189,26 +189,13 @@ class ChStatementBehaviorTest {
     }
 
     /**
-     * KNOWN BUG (failing on purpose — JDBC contract, asserted throughout v1
-     * {@code ClickHouseStatementTest#testExecuteBatch}/{@code testBatchUpdate}):
-     * {@link Statement#executeBatch()} must throw {@link java.sql.BatchUpdateException}
-     * (the {@code SQLException} subclass carrying the update counts of the commands
-     * that executed before the failure) when a batch entry fails.
-     *
-     * <p>Actual: {@code ChStatement.executeBatch} wraps the core failure via
-     * {@code wrap(...)} into a plain {@code SQLException}, so callers relying on
-     * {@code BatchUpdateException#getUpdateCounts()} break.
-     *
-     * <p>HOW TO FIX: in {@code ChStatement.executeBatch}
-     * (src/main/java/.../jdbc/ChStatement.java), catch the {@code ClickHouseException}
-     * at index {@code i} and throw
-     * {@code new BatchUpdateException(e.getMessage(), null, 0,
-     * java.util.Arrays.copyOf(results, i), e)} instead of {@code wrap(e)} (keep the
-     * {@code finally} batch-clearing as-is — that part is a documented deliberate
-     * divergence).
+     * A failed batch throws {@link java.sql.BatchUpdateException} — the
+     * {@code SQLException} subclass carrying the update counts of the commands that
+     * executed before the failure — per the JDBC contract (was knownBug 4; asserted
+     * throughout v1 {@code ClickHouseStatementTest#testExecuteBatch}/{@code testBatchUpdate}).
      */
     @Test
-    void knownBug_batchFailureShouldThrowBatchUpdateException() {
+    void batchFailureThrowsBatchUpdateException() {
         ScriptedCore core = new ScriptedCore();
         core.failOn = "DROP TABLE non_existing_table";
         ChStatement s = connected(core);
@@ -271,24 +258,13 @@ class ChStatementBehaviorTest {
     }
 
     /**
-     * KNOWN BUG (failing on purpose — JDBC contract; jdbc-v2
-     * {@code StatementTest#testCloseOnCompletion} honors it):
-     * {@code closeOnCompletion()} must make {@code isCloseOnCompletion()} report
-     * {@code true}, and the statement must close when its dependent result set closes.
-     *
-     * <p>Actual: {@code ChStatement.closeOnCompletion} is an empty no-op —
-     * the flag is not even stored, so the first assertion below fails.
-     *
-     * <p>HOW TO FIX: in {@code ChStatement}
-     * (src/main/java/.../jdbc/ChStatement.java) store a {@code closeOnCompletion}
-     * boolean set by {@code closeOnCompletion()} and returned by
-     * {@code isCloseOnCompletion()}; then have the statement close itself when its
-     * current result set is closed — e.g. pass the owning statement (or a close
-     * callback) into {@code ChResultSet}'s constructor and invoke
-     * {@code close()} from {@code ChResultSet.close()} when the flag is set.
+     * {@code closeOnCompletion()} is stored — {@code isCloseOnCompletion()} reports
+     * {@code true} — and honored: the statement closes when its dependent result set
+     * closes, via the {@code ChResultSet.close()} → {@code resultSetClosed} callback
+     * (was knownBug 7; jdbc-v2 {@code StatementTest#testCloseOnCompletion} honors it).
      */
     @Test
-    void knownBug_closeOnCompletionShouldBeStoredAndHonored() throws SQLException {
+    void closeOnCompletionIsStoredAndHonored() throws SQLException {
         ChStatement s = connected(new ScriptedCore());
         assertFalse(s.isCloseOnCompletion());
         s.closeOnCompletion();
@@ -303,9 +279,9 @@ class ChStatementBehaviorTest {
     /**
      * Pinned (deliberate): maxFieldSize reports 0 (no limit — this driver never
      * truncates values) and a positive setMaxFieldSize is accepted-and-ignored, which
-     * the JDBC javadoc permits for drivers without a field-size limit. The missing
+     * the JDBC javadoc permits for drivers without a field-size limit. The
      * negative-argument validation is covered separately by
-     * {@link #knownBug_setMaxFieldSizeShouldRejectNegativeValues()}.
+     * {@link #setMaxFieldSizeRejectsNegativeValues()}.
      */
     @Test
     void maxFieldSizeIsUnboundedAndPositiveSetterIsIgnored() throws SQLException {
@@ -316,20 +292,13 @@ class ChStatementBehaviorTest {
     }
 
     /**
-     * KNOWN BUG (failing on purpose — JDBC contract: {@code setMaxFieldSize} declares
-     * "SQLException ... if the condition max >= 0 is not satisfied"; jdbc-v2
-     * {@code StatementTest#testMaxFieldSize} asserts the throw).
-     *
-     * <p>Actual: {@code ChStatement.setMaxFieldSize} ignores its argument entirely,
-     * accepting negatives silently.
-     *
-     * <p>HOW TO FIX: in {@code ChStatement.setMaxFieldSize}
-     * (src/main/java/.../jdbc/ChStatement.java) add
-     * {@code if (max < 0) throw new SQLException("maxFieldSize must be >= 0");}
-     * mirroring the existing validation in {@code setMaxRows}/{@code setFetchSize}.
+     * A negative {@code setMaxFieldSize} throws {@link SQLException}, mirroring the
+     * validation in {@code setMaxRows}/{@code setFetchSize} (was knownBug 8; the JDBC
+     * contract declares "SQLException ... if the condition max >= 0 is not satisfied";
+     * jdbc-v2 {@code StatementTest#testMaxFieldSize} asserts the throw).
      */
     @Test
-    void knownBug_setMaxFieldSizeShouldRejectNegativeValues() {
+    void setMaxFieldSizeRejectsNegativeValues() {
         ChStatement s = connected(new ScriptedCore());
         assertThrows(SQLException.class, () -> s.setMaxFieldSize(-1),
                 "negative maxFieldSize must be rejected per the JDBC contract");

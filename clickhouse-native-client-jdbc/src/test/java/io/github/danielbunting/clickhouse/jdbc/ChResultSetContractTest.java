@@ -282,19 +282,12 @@ class ChResultSetContractTest {
     }
 
     /**
-     * KNOWN BUG (fails until fixed): JDBC spec (and jdbc-v2 ResultSetImplTest) — a
-     * negative fetch size is invalid and {@code setFetchSize(-1)} must throw
-     * {@link SQLException}. The positive-value hint may still be ignored.
-     *
-     * <p>Expected: SQLException. Actual: {@code ChResultSet.setFetchSize} is a total
-     * no-op and silently accepts the negative value.
-     *
-     * <p>Fix: in {@code ChResultSet.setFetchSize(int)} (ChResultSet.java), throw
-     * {@code new SQLException("fetchSize must be >= 0")} for negative arguments —
-     * mirroring the existing validation in {@code ChStatement.setFetchSize}.
+     * A negative fetch size is rejected with {@link SQLException}, mirroring
+     * {@code ChStatement.setFetchSize}; the positive-value hint is still ignored (was
+     * knownBug 27; JDBC spec and jdbc-v2 ResultSetImplTest).
      */
     @Test
-    void knownBug_negativeFetchSizeIsSilentlyAccepted() {
+    void negativeFetchSizeIsRejected() {
         ChResultSet rs = rows(1);
         assertThrows(SQLException.class, () -> rs.setFetchSize(-1),
                 "a negative fetch size must be rejected");
@@ -312,7 +305,7 @@ class ChResultSetContractTest {
         assertEquals(ResultSet.CLOSE_CURSORS_AT_COMMIT, rs.getHoldability());
         // This fixture is genuinely detached (built straight from blocks, no
         // Statement involved), so null is the correct answer HERE. The
-        // statement-produced case is knownBug_getStatementReturnsNullForStatementProducedResultSet.
+        // statement-produced case is getStatementReturnsProducingStatement.
         assertNull(rs.getStatement(), "a genuinely detached fixture has no statement");
         assertThrows(SQLFeatureNotSupportedException.class, rs::getCursorName);
         assertNull(rs.getWarnings());
@@ -325,22 +318,13 @@ class ChResultSetContractTest {
     // ------------------------------------------------------------------
 
     /**
-     * KNOWN BUG (fails until fixed): JDBC spec ({@link ResultSet#getStatement()}) —
-     * a result set produced by a {@link java.sql.Statement} must return that
-     * statement; only result sets produced "some other way" may return null.
-     *
-     * <p>Expected: {@code rs.getStatement()} returns the {@code ChStatement} whose
-     * {@code executeQuery} produced it. Actual: {@code ChResultSet.getStatement()}
-     * unconditionally returns null.
-     *
-     * <p>Fix: give {@code ChResultSet} (ChResultSet.java) an optional owning
-     * {@code Statement} field — pass {@code this} at the construction sites in
-     * {@code ChStatement.executeQuery} and {@code ChPreparedStatement.executeQuery}
-     * (keeping a detached constructor for statement-free producers) — and return it
-     * from {@code getStatement()}.
+     * A result set produced by a {@link java.sql.Statement} returns that statement
+     * from {@link ResultSet#getStatement()}; only detached (statement-free) result
+     * sets return null (was knownBug 26; the producing statement is passed into
+     * {@code ChResultSet} at the {@code executeQuery} construction sites).
      */
     @Test
-    void knownBug_getStatementReturnsNullForStatementProducedResultSet() throws SQLException {
+    void getStatementReturnsProducingStatement() throws SQLException {
         ChConnection conn = new ChConnection(new EmptyQueryCore(),
                 "jdbc:chnative://localhost:9000/default", new java.util.Properties());
         ChStatement stmt = new ChStatement(conn);
