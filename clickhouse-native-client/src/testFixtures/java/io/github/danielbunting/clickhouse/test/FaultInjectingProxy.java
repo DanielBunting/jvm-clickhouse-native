@@ -1,4 +1,4 @@
-package io.github.danielbunting.clickhouse.integration;
+package io.github.danielbunting.clickhouse.test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -41,7 +41,7 @@ import java.util.List;
  * beyond TCP's own, and faults apply to <i>all</i> live connections (tests
  * open exactly one).
  */
-final class FaultInjectingProxy implements AutoCloseable {
+public final class FaultInjectingProxy implements AutoCloseable {
 
     private final String upstreamHost;
     private final int upstreamPort;
@@ -68,7 +68,7 @@ final class FaultInjectingProxy implements AutoCloseable {
      * @param upstreamPort the real server port to forward to
      * @throws IOException if the listening socket cannot be bound
      */
-    FaultInjectingProxy(String upstreamHost, int upstreamPort) throws IOException {
+    public FaultInjectingProxy(String upstreamHost, int upstreamPort) throws IOException {
         this.upstreamHost = upstreamHost;
         this.upstreamPort = upstreamPort;
         this.serverSocket = new ServerSocket();
@@ -79,12 +79,12 @@ final class FaultInjectingProxy implements AutoCloseable {
     }
 
     /** The loopback address tests should connect to. */
-    String host() {
+    public String host() {
         return serverSocket.getInetAddress().getHostAddress();
     }
 
     /** The ephemeral port tests should connect to. */
-    int port() {
+    public int port() {
         return serverSocket.getLocalPort();
     }
 
@@ -92,7 +92,7 @@ final class FaultInjectingProxy implements AutoCloseable {
      * Holds back all server&rarr;client bytes (buffering them) until
      * {@link #resumeServerToClient()}. Client&rarr;server traffic is unaffected.
      */
-    void pauseServerToClient() {
+    public void pauseServerToClient() {
         synchronized (lock) {
             paused = true;
         }
@@ -104,7 +104,7 @@ final class FaultInjectingProxy implements AutoCloseable {
      *
      * @throws IOException if flushing the held-back bytes to the client fails
      */
-    void resumeServerToClient() throws IOException {
+    public void resumeServerToClient() throws IOException {
         synchronized (lock) {
             paused = false;
             if (heldBack.size() > 0) {
@@ -128,7 +128,7 @@ final class FaultInjectingProxy implements AutoCloseable {
      * @param bytes the raw bytes to deliver to the client
      * @throws IOException if writing to the client fails
      */
-    void injectServerToClient(byte[] bytes) throws IOException {
+    public void injectServerToClient(byte[] bytes) throws IOException {
         synchronized (lock) {
             for (OutputStream out : clientOutputs) {
                 out.write(bytes);

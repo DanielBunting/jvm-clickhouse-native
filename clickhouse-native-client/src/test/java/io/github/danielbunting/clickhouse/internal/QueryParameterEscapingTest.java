@@ -15,11 +15,16 @@ import org.junit.jupiter.api.Test;
 /**
  * Adversarial escaping coverage for the query-parameter Field-dump emitted by
  * {@link NativeClientImpl#writeQueryParameters} (via {@code dumpFieldValue}).
- * {@link QueryParametersWireTest} covers the happy wire form; this pins the escaping
- * contract: a String value is dumped as a single-quoted literal with backslash and single
- * quote escaped (FieldVisitorDump form), while other characters (newline, unicode) pass
- * through verbatim. Reading the wire string back proves what the server's
- * {@code Field::restoreFromDump} will receive. No socket / no server.
+ * {@link QueryParametersWireTest} covers the happy wire form; this pins the two-layer
+ * escaping contract. Layer 1 ({@code QueryParameters.toText}): the VALUE text is put into
+ * ClickHouse ESCAPED form — backslashes and control characters get backslash escapes —
+ * because the server escape-parses the restored value against the placeholder type (a raw
+ * backslash is escape-interpreted into corruption and a raw newline aborts with
+ * BAD_QUERY_PARAMETER; proven against a live server). Layer 2 ({@code dumpFieldValue}): the
+ * whole value is dumped as a single-quoted Field literal with backslash and single quote
+ * escaped (FieldVisitorDump form), which {@code Field::restoreFromDump} exactly reverses.
+ * Reading the wire string back proves what the server's restore will yield. No socket /
+ * no server.
  */
 class QueryParameterEscapingTest {
 
@@ -44,21 +49,28 @@ class QueryParameterEscapingTest {
     }
 
     @Test
-    void backslashIsDoubled() throws IOException {
-        // input is a single backslash between a and b -> 'a\\b' (doubled)
-        assertEquals("'a\\\\b'", dumpedValueOf("a\\b"));
+    void backslashIsQuadrupled() throws IOException {
+        // input: a single backslash between a and b. Layer 1 doubles it (ESCAPED value form,
+        // so the server's escape-parse restores exactly one), layer 2 doubles each again for
+        // the Field dump -> 'a\\\\b'. (The old single-doubling wire form made the server
+        // escape-interpret the raw backslash: "a\b" silently became a + backspace.)
+        assertEquals("'a\\\\\\\\b'", dumpedValueOf("a\\b"));
     }
 
     @Test
     void backslashThenQuoteBothEscaped() throws IOException {
-        // input: backslash then single quote -> each escaped independently
-        assertEquals("'\\\\\\''", dumpedValueOf("\\'"));
+        // input: backslash then single quote. Layer 1: \ -> \\ (the quote stays raw — quotes
+        // are content for String params and structural for composite params). Layer 2 escapes
+        // both backslashes and the quote for the dump.
+        assertEquals("'\\\\\\\\\\''", dumpedValueOf("\\'"));
     }
 
     @Test
-    void newlineIsNotEscaped_passesThroughVerbatim() throws IOException {
-        // dumpFieldValue only escapes \\ and '; a newline is left as-is inside the quotes.
-        assertEquals("'line1\nline2'", dumpedValueOf("line1\nline2"));
+    void newlineIsEscapedBeforeDump() throws IOException {
+        // Layer 1 turns the raw newline into backslash-n (the server's escaped-form parser
+        // aborts on a raw newline with BAD_QUERY_PARAMETER); layer 2 then doubles the
+        // backslash for the dump.
+        assertEquals("'line1\\\\nline2'", dumpedValueOf("line1\nline2"));
     }
 
     @Test

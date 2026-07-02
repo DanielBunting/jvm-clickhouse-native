@@ -1,8 +1,8 @@
 # Releasing
 
-All three modules (`clickhouse-native-client`, `clickhouse-native-client-jdbc`,
-`clickhouse-native-client-kotlin`) are published to Maven Central in lockstep,
-always with the same version number.
+All four modules (`clickhouse-native-client`, `clickhouse-native-client-jdbc`,
+`clickhouse-native-client-kotlin`, `clickhouse-native-client-adbc`) are published
+to Maven Central in lockstep, always with the same version number.
 
 ## Versioning
 
@@ -22,7 +22,7 @@ disagrees with the checkout's `VERSION` file.
 ## Snapshots (automatic)
 
 Every push to `main` that passes CI publishes `<major.minor>.<patch>-SNAPSHOT`
-of all three modules to the Central Portal snapshots repository
+of all four modules to the Central Portal snapshots repository
 (see the `publish-snapshot` job in [.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 Consumers opt in by adding the snapshots repo:

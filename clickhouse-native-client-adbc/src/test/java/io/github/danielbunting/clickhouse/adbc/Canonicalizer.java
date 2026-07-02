@@ -1,0 +1,105 @@
+package io.github.danielbunting.clickhouse.adbc;
+
+import java.math.BigDecimal;
+import java.net.InetAddress;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * Normalises a value from either the core client or the ADBC/Arrow side into one comparable
+ * space, so equivalence assertions don't depend on the (different) concrete Java types each
+ * side produces. Applied to BOTH sides before comparison.
+ *
+ * <ul>
+ *   <li>integers → {@code Long}; floating point → {@code Double}</li>
+ *   <li>{@code BigDecimal} → scale-insensitive plain string</li>
+ *   <li>{@code Instant} → {@code epochSecond:nano}; {@code LocalDate} → ISO string</li>
+ *   <li>{@code UUID}/{@code InetAddress}/{@code byte[]} → lower-case hex of the raw bytes</li>
+ *   <li>{@code List} → element-wise; {@code Map} → key-sorted list of {@code [key, value]}</li>
+ * </ul>
+ */
+final class Canonicalizer {
+
+    private Canonicalizer() {}
+
+    static Object canonical(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof BigDecimal bd) {
+            return bd.stripTrailingZeros().toPlainString();
+        }
+        if (value instanceof Boolean b) {
+            return b;
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return ((Number) value).doubleValue();
+        }
+        if (value instanceof Number n) {
+            return n.longValue();
+        }
+        if (value instanceof Instant ins) {
+            return ins.getEpochSecond() + ":" + ins.getNano();
+        }
+        if (value instanceof LocalDate d) {
+            return d.toString();
+        }
+        if (value instanceof UUID u) {
+            byte[] bytes = new byte[16];
+            long msb = u.getMostSignificantBits();
+            long lsb = u.getLeastSignificantBits();
+            for (int i = 7; i >= 0; i--) {
+                bytes[i] = (byte) (msb & 0xff);
+                msb >>= 8;
+                bytes[8 + i] = (byte) (lsb & 0xff);
+                lsb >>= 8;
+            }
+            return hex(bytes);
+        }
+        if (value instanceof InetAddress addr) {
+            return hex(addr.getAddress());
+        }
+        if (value instanceof byte[] bytes) {
+            return hex(bytes);
+        }
+        if (value instanceof CharSequence) {
+            return value.toString();
+        }
+        if (value instanceof List<?> list) {
+            List<Object> out = new ArrayList<>(list.size());
+            for (Object element : list) {
+                out.add(canonical(element));
+            }
+            return out;
+        }
+        if (value instanceof Map<?, ?> map) {
+            List<List<Object>> entries = new ArrayList<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                entries.add(List.of(
+                        String.valueOf(canonical(entry.getKey())),
+                        wrapNullable(canonical(entry.getValue()))));
+            }
+            entries.sort((a, b) -> ((String) a.get(0)).compareTo((String) b.get(0)));
+            return entries;
+        }
+        return value.toString();
+    }
+
+    /** {@link List#of} rejects nulls; keep map values that canonicalised to null comparable. */
+    private static Object wrapNullable(Object value) {
+        return value == null ? "null" : value;
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xf, 16));
+            sb.append(Character.forDigit(b & 0xf, 16));
+        }
+        return sb.toString();
+    }
+}

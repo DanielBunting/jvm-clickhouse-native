@@ -5,6 +5,7 @@ import io.github.danielbunting.clickhouse.ProtocolException
 import io.github.danielbunting.clickhouse.ServerException
 import io.github.danielbunting.clickhouse.mapping.ColumnBinder
 import io.github.danielbunting.clickhouse.mapping.RowMapper
+import io.github.danielbunting.clickhouse.mapping.RowMapperFactory
 import io.github.danielbunting.clickhouse.mapping.RowMappers
 import io.github.danielbunting.clickhouse.protocol.Block
 import io.github.danielbunting.clickhouse.protocol.ServerPacket
@@ -55,6 +56,19 @@ internal constructor(
     batchSize: Int,
     /** Connection guard held from [init] to [complete]/[close]. */
     private val guard: ConnectionGuard,
+    /**
+     * Optional override that builds the [RowMapper] from the target column names instead of
+     * introspecting [type]. When set, the reflective `bind`-into-scratch path is always used
+     * (the typed [ColumnBinder] fast path, which needs a POJO, is disabled).
+     */
+    private val mapperFactory: RowMapperFactory<T>? = null,
+    /**
+     * Explicit target column list. When non-null the INSERT names these columns
+     * (`INSERT INTO t (a, b) VALUES`), so the sample block — and thus the inserted set — is
+     * restricted to them and any omitted column takes its server-side DEFAULT. When null all of
+     * the table's insertable columns are used.
+     */
+    private val insertColumns: List<String>? = null,
 ) : BulkInserter<T> {
 
     private val client: NativeClient
@@ -164,7 +178,10 @@ internal constructor(
 
     /** Performs the actual init I/O; the connection guard is already held. */
     private fun initLocked() {
-        client.sendQuery("INSERT INTO " + table + " VALUES")
+        val columnClause = insertColumns
+            ?.joinToString(", ", " (", ")") { "`" + it + "`" }
+            ?: ""
+        client.sendQuery("INSERT INTO " + table + columnClause + " VALUES")
 
         val sample = readSampleBlock()
         val columnCount = sample.columnCount()
@@ -212,18 +229,25 @@ internal constructor(
         @Suppress("UNCHECKED_CAST")
         val resolvedCodecs = codecs as Array<ColumnCodec<*>>
 
-        this.mapper = RowMappers.forClass(type, *names)
-
-        // Build typed binders for the write path. If anything goes wrong, fall back
-        // entirely to the reflective Object-scratch path (binders == null).
-        try {
-            val nullableFlags = BooleanArray(columnCount)
-            for (i in 0 until columnCount) {
-                nullableFlags[i] = columns[i]!!.isNullable
-            }
-            this.binders = RowMappers.columnBinders(type, names, resolvedCodecs, nullableFlags)
-        } catch (e: RuntimeException) {
+        val mapperFactory = this.mapperFactory
+        if (mapperFactory != null) {
+            // Caller-supplied mapper (e.g. Arrow-backed): always use the reflective scratch path.
+            this.mapper = mapperFactory.create(names)
             this.binders = null
+        } else {
+            this.mapper = RowMappers.forClass(type, *names)
+
+            // Build typed binders for the write path. If anything goes wrong, fall back
+            // entirely to the reflective Object-scratch path (binders == null).
+            try {
+                val nullableFlags = BooleanArray(columnCount)
+                for (i in 0 until columnCount) {
+                    nullableFlags[i] = columns[i]!!.isNullable
+                }
+                this.binders = RowMappers.columnBinders(type, names, resolvedCodecs, nullableFlags)
+            } catch (e: RuntimeException) {
+                this.binders = null
+            }
         }
 
         this.bufferedRows = 0
@@ -295,10 +319,22 @@ internal constructor(
                 val col = columns[i]!!
                 val value = rowScratch[i]
                 val nulls = col.nulls()
-                if (value == null && nulls != null) {
-                    nulls[r] = true
-                    // Leave the value slot at the codec's default; it is masked by the null-map.
-                    continue
+                if (value == null) {
+                    if (nulls != null) {
+                        nulls[r] = true
+                        // Leave the value slot at the codec's default; it is masked by the null-map.
+                        continue
+                    }
+                    // LowCardinality(Nullable(T)) has no parallel null-map: its null-ness lives in
+                    // the dictionary (key 0 is the NULL placeholder), so the codec stores the null.
+                    if (codecStoresNulls(codecs[i]!!)) {
+                        setValue(codecs[i]!!, col.values(), r, null)
+                        continue
+                    }
+                    // A non-nullable column cannot store null; fail clearly rather than letting the
+                    // codec NPE while unboxing (or silently coerce, e.g. Array -> []).
+                    throw IllegalArgumentException(
+                        "Cannot insert null into non-nullable column '" + col.name() + "'")
                 }
                 if (nulls != null) {
                     nulls[r] = false
@@ -482,6 +518,16 @@ internal constructor(
         @Suppress("UNCHECKED_CAST")
         private fun setValue(codec: ColumnCodec<*>, array: Any?, row: Int, value: Any?) {
             (codec as ColumnCodec<Any>).set(array as Any, row, value)
+        }
+
+        /**
+         * Whether [codec] stores nulls internally rather than via the column's parallel
+         * null-map — true for `LowCardinality(Nullable(T))`, whose dictionary reserves the
+         * NULL placeholder slot.
+         */
+        private fun codecStoresNulls(codec: ColumnCodec<*>): Boolean {
+            return codec is io.github.danielbunting.clickhouse.types.codec.LowCardinalityColumnCodec &&
+                codec.inner() is io.github.danielbunting.clickhouse.types.codec.NullableColumnCodec
         }
     }
 }

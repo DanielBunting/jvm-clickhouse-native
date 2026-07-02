@@ -24,6 +24,11 @@ dependencies {
     jmh("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     // Shared test-only helpers (e.g. ClickHouseImages) from clickhouse-native-client's test fixtures.
     jmh(testFixtures(project(":clickhouse-native-client")))
+    // ADBC (Arrow) driver under test, plus the Arrow vector API and an off-heap allocator
+    // (memory-netty) the reader allocates batch buffers from.
+    jmh(project(":clickhouse-native-client-adbc"))
+    jmh("org.apache.arrow:arrow-vector:18.3.0")
+    jmh("org.apache.arrow:arrow-memory-netty:18.3.0")
     // Competitors for the head-to-head comparison table.
     // Official driver stack, HTTP (port 8123), one aligned version. clickhouse-jdbc
     // 0.9.x ships BOTH generations: com.clickhouse.jdbc.ClickHouseDriver (the v2
@@ -44,6 +49,9 @@ jmh {
     fork.set(1)
     // Report allocation rate / bytes-per-op so the low-allocation claim is measurable.
     profilers.add("gc")
+    // Arrow's off-heap allocator (memory-netty) reflects into java.nio.DirectByteBuffer;
+    // JDK 17 needs this opened or the ADBC benchmark fails at allocator construction.
+    jvmArgsAppend.add("--add-opens=java.base/java.nio=ALL-UNNAMED")
     // ch.host is read inside the forked benchmark JVM (ClickHouseResource), which
     // doesn't inherit the Gradle invocation's -D flags — forward it explicitly.
     providers.systemProperty("ch.host").orNull?.let { jvmArgsAppend.add("-Dch.host=$it") }

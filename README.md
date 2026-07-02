@@ -49,6 +49,7 @@ Full walkthrough (table, insert, typed reads): [docs/quickstart.md](docs/quickst
 - **Failover & load balancing** — multi-endpoint configs with `FIRST_ALIVE`, `ROUND_ROBIN`, `RANDOM` policies
 - **TLS / mTLS / tokens** — trust stores, client certificates, access-token auth
 - **JDBC 4.3 driver** — `jdbc:chnative://`, prepared statements, multi-row batch collapse
+- **ADBC driver** — Arrow Database Connectivity; results stream as Arrow `VectorSchemaRoot` batches, plus Arrow-native bulk ingest
 - **Kotlin coroutines** — suspend functions, `Flow` streaming (per-row, batched `List<T>`, or whole blocks), config DSL, `Flow`-sourced bulk insert
 - **50+ ClickHouse types** — through `Variant`, `Dynamic`, `JSON`, and Geo
 - **Cross-client tested** — round-trip compatibility with the official JDBC driver verified on ClickHouse 25.8–26.5
@@ -73,7 +74,7 @@ Full reference with notes and insert-binding rules: [docs/data-types.md](docs/da
 
 ## Installation
 
-Releases are on [Maven Central](https://central.sonatype.com/artifact/io.github.danielbunting.clickhouse/clickhouse-native-client); all three modules always share one version. The Maven Central badge above (or the [Releases page](https://github.com/DanielBunting/jvm-clickhouse-native/releases)) shows the latest — substitute it for `<version>` below.
+Releases are on [Maven Central](https://central.sonatype.com/artifact/io.github.danielbunting.clickhouse/clickhouse-native-client); all four modules always share one version. The Maven Central badge above (or the [Releases page](https://github.com/DanielBunting/jvm-clickhouse-native/releases)) shows the latest — substitute it for `<version>` below.
 
 ```kotlin
 // Gradle (Kotlin DSL)
@@ -81,6 +82,7 @@ dependencies {
     implementation("io.github.danielbunting.clickhouse:clickhouse-native-client:<version>")
     implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-kotlin:<version>") // Kotlin extensions
     implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-jdbc:<version>")   // JDBC driver
+    implementation("io.github.danielbunting.clickhouse:clickhouse-native-client-adbc:<version>")   // ADBC (Arrow) driver
 }
 ```
 
@@ -201,6 +203,27 @@ try (Connection conn = DriverManager.getConnection(
 }
 ```
 
+### ADBC
+
+```java
+Map<String, Object> params = new HashMap<>();
+AdbcDriver.PARAM_URI.set(params, "chnative://localhost:9000/default");
+
+try (BufferAllocator allocator = new RootAllocator();
+     AdbcDatabase database = new ChAdbcDriver(allocator).open(params);
+     AdbcConnection connection = database.connect();
+     AdbcStatement statement = connection.createStatement()) {
+    statement.setSqlQuery("SELECT id, name FROM events ORDER BY id");
+    try (AdbcStatement.QueryResult result = statement.executeQuery()) {
+        ArrowReader reader = result.getReader();
+        VectorSchemaRoot root = reader.getVectorSchemaRoot();
+        while (reader.loadNextBatch()) {
+            // each Arrow batch holds root.getRowCount() rows
+        }
+    }
+}
+```
+
 ## Documentation
 
 | Guide | Description |
@@ -213,6 +236,7 @@ try (Connection conn = DriverManager.getConnection(
 | [Connection pooling](docs/connection-pooling.md) | Concurrency, validation, self-healing |
 | [Kotlin extensions](docs/kotlin.md) | Coroutines, `Flow`, config DSL |
 | [JDBC driver](docs/jdbc.md) | `jdbc:chnative://` usage and limitations |
+| [ADBC driver](docs/adbc.md) | Arrow Database Connectivity: Arrow-batch results, ingest, metadata, type mapping |
 | [Cross-client compatibility](docs/cross-client-compatibility.md) | Round-trip behavior vs the official driver, ClickHouse 25.8–26.5 |
 
 ## Samples
@@ -225,6 +249,7 @@ Runnable end-to-end demos live in [`samples/`](samples/). All honor `CH_HOST`, `
 | Queries | SELECT patterns: blocks, parameters, typed mapping | `:samples:runQueries` / `:samples:runKotlinQueries` |
 | BulkInserts | Inserter lifecycle, large batches, producer-style ingestion | `:samples:runBulkInserts` / `:samples:runKotlinBulkInserts` |
 | Pooling | Connection pool usage under concurrency | `:samples:runPooling` / `:samples:runKotlinPooling` |
+| AdbcQuickStart | ADBC driver discovery, SELECT, Arrow schema + streaming batches | `:samples:runAdbcQuickStart` |
 | Streaming | Multi-block result iteration | (no run task yet — see `Streaming.java`/`Streaming.kt`) |
 | Wikimedia / Coinbase / Bluesky | Live event streams ingested via bulk insert (needs internet) | `:samples:runWikimedia`, `:samples:runCoinbase`, `:samples:runBluesky` (+ `runKotlin*` variants) |
 

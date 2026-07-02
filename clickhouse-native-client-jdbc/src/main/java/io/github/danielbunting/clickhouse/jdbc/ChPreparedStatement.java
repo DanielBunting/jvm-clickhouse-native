@@ -2,6 +2,7 @@ package io.github.danielbunting.clickhouse.jdbc;
 
 import io.github.danielbunting.clickhouse.ClickHouseException;
 import io.github.danielbunting.clickhouse.QueryParameters;
+import io.github.danielbunting.clickhouse.sql.SqlPlaceholders;
 import java.io.InputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
@@ -155,126 +156,9 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
      * @return the offsets of the bindable {@code ?} characters, in order
      */
     static List<Integer> placeholderPositions(String sql) {
-        int n = sql.length();
-        // Offsets of every real-text '?', in order; ternary '?'s are struck out
-        // (by index into this list) as their pairing ':' arrives.
-        List<Integer> questionMarks = new ArrayList<>();
-        java.util.BitSet ternary = new java.util.BitSet();
-        // Bracket-opener stack; its length is the current nesting depth.
-        StringBuilder openers = new StringBuilder();
-        // Per depth, the indexes (into questionMarks) of '?'s still eligible to be a
-        // ternary condition at that depth, in scan order.
-        List<java.util.ArrayDeque<Integer>> pending = new ArrayList<>();
-        pending.add(new java.util.ArrayDeque<>());
-        int i = 0;
-        while (i < n) {
-            char c = sql.charAt(i);
-            int depth = openers.length();
-            if (c == '\'' || c == '`' || c == '"') {
-                i = skipQuoted(sql, i);
-            } else if (c == '#' || (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-')) {
-                i = skipLineComment(sql, i);
-            } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i);
-            } else if (c == '(' || c == '[' || c == '{') {
-                openers.append(c);
-                if (pending.size() <= openers.length()) {
-                    pending.add(new java.util.ArrayDeque<>());
-                }
-                i++;
-            } else if (c == ')' || c == ']' || c == '}') {
-                if (depth > 0) {
-                    // The bracket's expression ends: its still-unpaired '?'s are
-                    // placeholders for good.
-                    pending.get(depth).clear();
-                    openers.setLength(depth - 1);
-                }
-                i++;
-            } else if (c == ',' || c == ';') {
-                // An expression boundary at this depth: its unpaired '?'s stay
-                // placeholders.
-                pending.get(depth).clear();
-                i++;
-            } else if (c == '?') {
-                pending.get(depth).addLast(questionMarks.size());
-                questionMarks.add(i);
-                i++;
-            } else if (c == ':') {
-                if (i + 1 < n && sql.charAt(i + 1) == ':') {
-                    i += 2; // '::' cast operator — never a ternary colon
-                } else {
-                    // Inside braces the ':' is a {name:Type} separator, not a ternary
-                    // colon; elsewhere it claims the nearest preceding unpaired '?'
-                    // at this depth (if any) as a ternary condition.
-                    boolean insideBraces = depth > 0 && openers.charAt(depth - 1) == '{';
-                    if (!insideBraces && !pending.get(depth).isEmpty()) {
-                        ternary.set(pending.get(depth).removeLast());
-                    }
-                    i++;
-                }
-            } else {
-                i++;
-            }
-        }
-        List<Integer> positions = new ArrayList<>(questionMarks.size());
-        for (int q = 0; q < questionMarks.size(); q++) {
-            if (!ternary.get(q)) {
-                positions.add(questionMarks.get(q));
-            }
-        }
-        return positions;
-    }
-
-    /**
-     * Skips a quoted region (string literal or quoted identifier) starting at the
-     * opening quote; returns the index just past the closing quote. A backslash
-     * consumes the following character; a doubled quote stays inside the region.
-     * An unterminated region consumes the rest of the text.
-     */
-    private static int skipQuoted(String sql, int start) {
-        char q = sql.charAt(start);
-        int n = sql.length();
-        int i = start + 1;
-        while (i < n) {
-            char c = sql.charAt(i);
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-            } else if (c == q) {
-                if (i + 1 < n && sql.charAt(i + 1) == q) {
-                    i += 2;
-                } else {
-                    return i + 1;
-                }
-            } else {
-                i++;
-            }
-        }
-        return n;
-    }
-
-    /** Skips a {@code --}/{@code #}/{@code #!} line comment through its newline. */
-    private static int skipLineComment(String sql, int start) {
-        int nl = sql.indexOf('\n', start);
-        return nl < 0 ? sql.length() : nl + 1;
-    }
-
-    /** Skips a (nesting) block comment; an unterminated one consumes the rest. */
-    private static int skipBlockComment(String sql, int start) {
-        int n = sql.length();
-        int depth = 1;
-        int i = start + 2;
-        while (i < n && depth > 0) {
-            if (sql.charAt(i) == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
-                depth++;
-                i += 2;
-            } else if (sql.charAt(i) == '*' && i + 1 < n && sql.charAt(i + 1) == '/') {
-                depth--;
-                i += 2;
-            } else {
-                i++;
-            }
-        }
-        return i;
+        // The scanner itself lives in the core module (SqlPlaceholders), shared with the
+        // ADBC driver's parameter binding so the two can never drift.
+        return SqlPlaceholders.positions(sql);
     }
 
     /**
@@ -498,23 +382,14 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
 
     /**
      * Variant of {@link #rewriteToNamedParams(String, Object[])} taking the template's
-     * precomputed placeholder offsets (see {@link #placeholderOffsets}).
+     * precomputed placeholder offsets (see {@link #placeholderOffsets}). Delegates to the
+     * core module's shared {@link SqlPlaceholders} rewriter.
      */
     private static String rewriteToNamedParams(
             String template, List<Integer> positions, Object[] values) {
-        StringBuilder out = new StringBuilder(template.length() + 16);
-        int prev = 0;
-        int param = 1;
-        for (int pos : positions) {
-            out.append(template, prev, pos);
-            boolean nullable = values != null && (param >= values.length || values[param] == null);
-            out.append('{').append(PARAM_NAME_PREFIX).append(param)
-                    .append(nullable ? ":Nullable(String)}" : ":String}");
-            param++;
-            prev = pos + 1;
-        }
-        out.append(template, prev, template.length());
-        return out.toString();
+        return SqlPlaceholders.rewriteToNamedParams(template, positions,
+                values == null ? null
+                        : param -> param >= values.length || values[param] == null);
     }
 
     /**

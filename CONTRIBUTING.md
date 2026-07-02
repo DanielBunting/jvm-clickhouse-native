@@ -40,6 +40,7 @@ a local tool for validating performance claims.
 | `clickhouse-native-client` | core client (native TCP protocol, column-major data plane) |
 | `clickhouse-native-client-jdbc` | JDBC driver on top of the core client |
 | `clickhouse-native-client-kotlin` | coroutine-native Kotlin surface |
+| `clickhouse-native-client-adbc` | ADBC (Arrow Database Connectivity) driver on top of the core client |
 | `benchmarks`, `samples` | internal, never published |
 
 ## Code conventions

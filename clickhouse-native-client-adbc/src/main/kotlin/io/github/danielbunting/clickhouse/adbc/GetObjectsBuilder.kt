@@ -1,0 +1,225 @@
+package io.github.danielbunting.clickhouse.adbc
+
+import io.github.danielbunting.clickhouse.ClickHouseConnection
+import org.apache.arrow.adbc.core.AdbcConnection.GetObjectsDepth
+import org.apache.arrow.vector.IntVector
+import org.apache.arrow.vector.VarCharVector
+import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.complex.StructVector
+import java.nio.charset.StandardCharsets
+
+/**
+ * Builds the ADBC `GET_OBJECTS` Arrow structure from ClickHouse `system` tables.
+ *
+ * ClickHouse has no catalog layer, so this exposes a single unnamed catalog (`""`) whose
+ * db-schemas are ClickHouse databases — consistent with [ChAdbcConnection.getTableSchema], which
+ * also treats `dbSchema` as the database. The requested [GetObjectsDepth] bounds how far the
+ * nested structure is populated; deeper levels below the requested depth are left null.
+ */
+internal object GetObjectsBuilder {
+
+    private const val CATALOG_NAME = ""
+
+    private data class Col(val name: String, val type: String, val position: Int)
+    private data class Tbl(val name: String, val type: String, val columns: MutableList<Col> = ArrayList())
+    private data class Db(val name: String, val tables: MutableList<Tbl> = ArrayList())
+
+    fun build(
+        connection: ClickHouseConnection,
+        depth: GetObjectsDepth,
+        catalogPattern: String?,
+        dbSchemaPattern: String?,
+        tableNamePattern: String?,
+        tableTypes: Array<String>?,
+        columnNamePattern: String?,
+        root: VectorSchemaRoot,
+    ) {
+        val catalogVector = root.getVector("catalog_name") as VarCharVector
+        val schemasList = root.getVector("catalog_db_schemas") as ListVector
+
+        // The single catalog is filtered out entirely if a non-matching catalog pattern is given.
+        if (catalogPattern != null && !likeMatches(CATALOG_NAME, catalogPattern)) {
+            root.rowCount = 0
+            return
+        }
+
+        catalogVector.setSafe(0, CATALOG_NAME.toByteArray(StandardCharsets.UTF_8))
+
+        if (depth == GetObjectsDepth.CATALOGS) {
+            schemasList.setNull(0)
+            root.setRowCount(1)
+            return
+        }
+
+        val databases = gather(
+            connection, depth, dbSchemaPattern, tableNamePattern, tableTypes, columnNamePattern
+        )
+        populateSchemas(schemasList, databases, depth)
+        root.setRowCount(1)
+    }
+
+    private fun gather(
+        connection: ClickHouseConnection,
+        depth: GetObjectsDepth,
+        dbSchemaPattern: String?,
+        tableNamePattern: String?,
+        tableTypes: Array<String>?,
+        columnNamePattern: String?,
+    ): List<Db> {
+        val dbPat = dbSchemaPattern ?: "%"
+        val byName = LinkedHashMap<String, Db>()
+        query(
+            connection,
+            "SELECT name FROM system.databases WHERE name LIKE '${escape(dbPat)}' ORDER BY name"
+        ) { c -> byName[c.stringAt(0)!!] = Db(c.stringAt(0)!!) }
+
+        val includeTables = depth == GetObjectsDepth.TABLES || depth == GetObjectsDepth.ALL
+        if (!includeTables) {
+            return byName.values.toList()
+        }
+
+        val typeFilter = tableTypes?.toHashSet()
+        val tablePat = tableNamePattern ?: "%"
+        // Keyed by a structured (database, table) pair so identifiers containing any character —
+        // including separators — can never collide (a string-concatenated key could).
+        val tablesByKey = HashMap<Pair<String, String>, Tbl>()
+        query(
+            connection,
+            "SELECT database, name, engine FROM system.tables " +
+                "WHERE database LIKE '${escape(dbPat)}' AND name LIKE '${escape(tablePat)}' " +
+                "ORDER BY database, name"
+        ) { row ->
+            val database = row.stringAt(0)!!
+            val name = row.stringAt(1)!!
+            val db = byName[database] ?: return@query
+            val type = tableType(row.stringAt(2)!!)
+            if (typeFilter != null && !typeFilter.contains(type)) {
+                return@query
+            }
+            val tbl = Tbl(name, type)
+            db.tables.add(tbl)
+            tablesByKey[database to name] = tbl
+        }
+
+        if (depth != GetObjectsDepth.ALL) {
+            return byName.values.toList()
+        }
+
+        val colPat = columnNamePattern ?: "%"
+        query(
+            connection,
+            "SELECT database, table, name, type, position FROM system.columns " +
+                "WHERE database LIKE '${escape(dbPat)}' AND table LIKE '${escape(tablePat)}' " +
+                "AND name LIKE '${escape(colPat)}' ORDER BY database, table, position"
+        ) { row ->
+            val tbl = tablesByKey[row.stringAt(0)!! to row.stringAt(1)!!] ?: return@query
+            tbl.columns.add(Col(row.stringAt(2)!!, row.stringAt(3)!!, row.longAt(4).toInt()))
+        }
+        return byName.values.toList()
+    }
+
+    private fun populateSchemas(schemasList: ListVector, databases: List<Db>, depth: GetObjectsDepth) {
+        val schemaStruct = schemasList.dataVector as StructVector
+        val schemaName = schemaStruct.getChild("db_schema_name", VarCharVector::class.java)
+        val tablesList = schemaStruct.getChild("db_schema_tables", ListVector::class.java)
+
+        val schemaStart = schemasList.startNewValue(0)
+        databases.forEachIndexed { i, db ->
+            val si = schemaStart + i
+            schemaStruct.setIndexDefined(si)
+            schemaName.setSafe(si, db.name.toByteArray(StandardCharsets.UTF_8))
+            if (depth == GetObjectsDepth.DB_SCHEMAS) {
+                tablesList.setNull(si)
+            } else {
+                populateTables(tablesList, si, db.tables, depth)
+            }
+        }
+        schemasList.endValue(0, databases.size)
+    }
+
+    private fun populateTables(tablesList: ListVector, schemaIndex: Int, tables: List<Tbl>, depth: GetObjectsDepth) {
+        val tableStruct = tablesList.dataVector as StructVector
+        val tableName = tableStruct.getChild("table_name", VarCharVector::class.java)
+        val tableType = tableStruct.getChild("table_type", VarCharVector::class.java)
+        val columnsList = tableStruct.getChild("table_columns", ListVector::class.java)
+        val constraintsList = tableStruct.getChild("table_constraints", ListVector::class.java)
+
+        val tableStart = tablesList.startNewValue(schemaIndex)
+        tables.forEachIndexed { k, tbl ->
+            val ti = tableStart + k
+            tableStruct.setIndexDefined(ti)
+            tableName.setSafe(ti, tbl.name.toByteArray(StandardCharsets.UTF_8))
+            tableType.setSafe(ti, tbl.type.toByteArray(StandardCharsets.UTF_8))
+            // Constraints are not modelled for ClickHouse.
+            constraintsList.setNull(ti)
+            if (depth == GetObjectsDepth.ALL) {
+                populateColumns(columnsList, ti, tbl.columns)
+            } else {
+                columnsList.setNull(ti)
+            }
+        }
+        tablesList.endValue(schemaIndex, tables.size)
+    }
+
+    private fun populateColumns(columnsList: ListVector, tableIndex: Int, columns: List<Col>) {
+        val columnStruct = columnsList.dataVector as StructVector
+        val columnName = columnStruct.getChild("column_name", VarCharVector::class.java)
+        val ordinalPosition = columnStruct.getChild("ordinal_position", IntVector::class.java)
+
+        val columnStart = columnsList.startNewValue(tableIndex)
+        columns.forEachIndexed { j, col ->
+            val ci = columnStart + j
+            columnStruct.setIndexDefined(ci)
+            columnName.setSafe(ci, col.name.toByteArray(StandardCharsets.UTF_8))
+            ordinalPosition.setSafe(ci, col.position)
+            // The xdbc_* columns are left null (their detail is available via getTableSchema).
+        }
+        columnsList.endValue(tableIndex, columns.size)
+    }
+
+    /** A positional view over one row of a block: `stringAt(col)` / `longAt(col)`. */
+    private class RowView(private val block: io.github.danielbunting.clickhouse.protocol.Block, private val row: Int) {
+        fun stringAt(col: Int): String? = block.column(col).stringAt(row)
+        fun longAt(col: Int): Long = block.column(col).longAt(row)
+    }
+
+    private fun query(
+        connection: ClickHouseConnection,
+        sql: String,
+        rowHandler: (RowView) -> Unit,
+    ) {
+        connection.query(sql).use { result ->
+            val blocks = result.blocks()
+            while (blocks.hasNext()) {
+                val block = blocks.next()
+                if (block.isEmpty) {
+                    continue
+                }
+                for (r in 0 until block.rowCount()) {
+                    rowHandler(RowView(block, r))
+                }
+            }
+        }
+    }
+
+    /** ClickHouse engine name to ADBC table type. */
+    private fun tableType(engine: String): String =
+        if (engine.contains("View")) "VIEW" else "TABLE"
+
+    private fun escape(value: String): String = value.replace("'", "''")
+
+    /** Minimal SQL `LIKE` matcher (`%` = any run, `_` = any one char) for the catalog filter. */
+    private fun likeMatches(text: String, pattern: String): Boolean {
+        val regex = StringBuilder("^")
+        for (ch in pattern) {
+            when (ch) {
+                '%' -> regex.append(".*")
+                '_' -> regex.append('.')
+                else -> regex.append(Regex.escape(ch.toString()))
+            }
+        }
+        regex.append('$')
+        return Regex(regex.toString()).matches(text)
+    }
+}
