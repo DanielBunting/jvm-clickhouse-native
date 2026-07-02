@@ -12,14 +12,18 @@ import io.github.danielbunting.clickhouse.types.codec.DateTimeCodec;
 import io.github.danielbunting.clickhouse.types.codec.DecimalCodec;
 import io.github.danielbunting.clickhouse.types.codec.Int32Codec;
 import io.github.danielbunting.clickhouse.types.codec.StringColumnCodec;
+import io.github.danielbunting.clickhouse.types.codec.TimeCodec;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Date;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Calendar;
+import java.util.TimeZone;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -53,6 +57,75 @@ class ChResultSetTemporalTest {
         assertTrue(rs.next());
         // The Calendar is currently ignored; the overloads return the same value.
         assertEquals(rs.getTimestamp(1), rs.getTimestamp(1, Calendar.getInstance()));
+    }
+
+    /**
+     * {@code sql.Time} read surface (reference: client-v2 DataTypeUtilsTests
+     * {@code testToLocalTimeWithCalendar} / {@code testToLocalTimeWithTimeZoneObject},
+     * where a {@code sql.Time} converts to a {@link java.time.LocalTime} under an
+     * explicit Calendar/TimeZone).
+     *
+     * <p>DEVIATION: this driver has no {@code sql.Time}/{@code LocalTime} read path at
+     * all — every {@code getTime} overload (plain, by-label, and both Calendar forms,
+     * regardless of the Calendar's zone) throws {@link SQLFeatureNotSupportedException},
+     * even on a genuine {@code Time} column. The supported surface for a Time column is
+     * {@code getObject}, which returns the codec's {@link Duration} box (a
+     * zone-less time-of-day count, so the reference's zone-shifting conversions have
+     * nothing to act on). The write side is covered by
+     * {@code ChPreparedStatementBindingTest#calendarOverloadsRenderIdenticallyToPlainSetters}.
+     */
+    @Test
+    void getTime_unsupportedOnTimeColumn_durationIsTheContract() throws SQLException {
+        Duration tod = Duration.ofHours(12).plusMinutes(34).plusSeconds(56);
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("t", "Time", new TimeCodec(), tod));
+        assertTrue(rs.next());
+
+        // The supported read: the raw Duration box.
+        assertEquals(tod, rs.getObject(1));
+
+        // All four getTime overloads throw, with any Calendar zone.
+        Calendar utc = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        Calendar shanghai = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getTime(1));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getTime("t"));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getTime(1, utc));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getTime(1, shanghai));
+        assertThrows(SQLFeatureNotSupportedException.class, () -> rs.getTime("t", utc));
+    }
+
+    /**
+     * Zone-carrying temporal getters (reference: jdbc-v1
+     * ClickHouseResultSetTest#testDateTimeWithoutTimezone, where {@code getObject(col,
+     * OffsetDateTime.class)} / {@code ZonedDateTime.class} return zone-aware views and
+     * the plain {@code getObject} is a LocalDateTime).
+     *
+     * <p>DEVIATION: this driver boxes DateTime/DateTime64 as an absolute
+     * {@link Instant} (the plain {@code getObject} return) and offers no
+     * OffsetDateTime/ZonedDateTime/LocalDateTime coercions — those requests throw
+     * SQLException. Callers zone the Instant themselves; a {@code session_timezone}
+     * only shifts how the server interprets wall-clock literals, never the Instant
+     * contract here.
+     */
+    @Test
+    void getObject_zonedTemporalTypes_unsupportedInstantContract() throws SQLException {
+        Instant when = Instant.parse("2026-05-30T13:45:07Z");
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("t", "DateTime", new DateTimeCodec(null), when));
+        assertTrue(rs.next());
+
+        // The supported surface: raw Instant, Instant passthrough, Timestamp coercion.
+        assertEquals(when, rs.getObject(1));
+        assertEquals(when, rs.getObject(1, Instant.class));
+        assertEquals(Timestamp.from(when), rs.getObject(1, Timestamp.class));
+
+        // The reference's zone-aware coercions have no counterpart.
+        assertThrows(SQLException.class,
+                () -> rs.getObject(1, java.time.OffsetDateTime.class));
+        assertThrows(SQLException.class,
+                () -> rs.getObject(1, java.time.ZonedDateTime.class));
+        assertThrows(SQLException.class,
+                () -> rs.getObject(1, java.time.LocalDateTime.class));
     }
 
     @Test

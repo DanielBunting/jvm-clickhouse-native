@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.danielbunting.clickhouse.ServerException;
+import io.github.danielbunting.clickhouse.jdbc.ChDataSource;
 import io.github.danielbunting.clickhouse.test.ClickHouseImages;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -514,6 +515,294 @@ class JdbcSessionIT {
                 assertEquals(60, server.code(),
                         "expected UNKNOWN_TABLE (60) but got: " + e.getMessage());
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 10. Password-type matrix (reference: AccessManagementTest#testPasswordAuthentication)
+    // ------------------------------------------------------------------
+
+    /**
+     * Users created with each server-side password type — plaintext, SHA-256 and
+     * double-SHA1 — must all be able to authenticate over the native protocol (which
+     * transmits the password and lets the server verify against its stored form), and a
+     * wrong password must fail with AUTHENTICATION_FAILED for each type.
+     */
+    @Test
+    void passwordAuthTypesAllAuthenticate() throws Exception {
+        String[][] users = {
+                {"jdbc_auth_plain", "plaintext_password"},
+                {"jdbc_auth_sha256", "sha256_password"},
+                {"jdbc_auth_double_sha1", "double_sha1_password"},
+        };
+        try (Connection admin = connect(); Statement st = admin.createStatement()) {
+            for (String[] user : users) {
+                st.execute("DROP USER IF EXISTS " + user[0]);
+                st.execute("CREATE USER " + user[0] + " IDENTIFIED WITH " + user[1]
+                        + " BY 'secret-" + user[0] + "'");
+            }
+        }
+        for (String[] user : users) {
+            try (Connection conn = connectAs(user[0], "secret-" + user[0]);
+                    Statement st = conn.createStatement();
+                    ResultSet rs = st.executeQuery("SELECT currentUser()")) {
+                assertTrue(rs.next());
+                assertEquals(user[0], rs.getString(1),
+                        "login should succeed for password type " + user[1]);
+            }
+
+            SQLException e = assertThrows(SQLException.class,
+                    () -> connectAs(user[0], "wrong-password").close(),
+                    "wrong password must be rejected for password type " + user[1]);
+            ServerException server = serverException(e);
+            assertNotNull(server, "auth failure must chain the server error: " + e);
+            assertEquals(516, server.code(),
+                    "expected AUTHENTICATION_FAILED (516) for " + user[1] + ": " + e.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 11. setReadOnly (reference: v1 ClickHouseConnectionTest#testReadOnly, disabled upstream)
+    // ------------------------------------------------------------------
+
+    /**
+     * DEVIATION from the reference driver (which maps read-only mode onto the server's
+     * {@code readonly} setting so writes are rejected): {@code ChConnection.setReadOnly}
+     * only stores the flag client-side and does NOT enforce anything server-side, so
+     * writes still succeed. Pinned so a future enforcement change is deliberate.
+     */
+    @Test
+    void setReadOnlyIsClientSideOnlyAndDoesNotBlockWrites() throws Exception {
+        try (Connection conn = connect()) {
+            conn.setReadOnly(true);
+            assertTrue(conn.isReadOnly(), "the flag itself round-trips");
+            try (Statement st = conn.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS jdbc_session_readonly_probe");
+                st.execute("CREATE TABLE jdbc_session_readonly_probe (id UInt8) ENGINE = Memory");
+                st.execute("INSERT INTO jdbc_session_readonly_probe VALUES (1)");
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT count() FROM jdbc_session_readonly_probe")) {
+                    assertTrue(rs.next());
+                    assertEquals(1, rs.getInt(1),
+                            "writes went through despite setReadOnly(true)");
+                }
+                st.execute("DROP TABLE jdbc_session_readonly_probe");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 12. Connection-level server settings via URL (reference: jdbc-v2
+    //     ConnectionTest#testMaxResultRowsProperty / #testCustomParameters)
+    // ------------------------------------------------------------------
+
+    /**
+     * A {@code settings.<name>=<value>} URL parameter becomes a per-connection default
+     * server setting that the server actually enforces: {@code max_result_rows=5} makes
+     * a 20-row select fail with TOO_MANY_ROWS_OR_BYTES (396). This driver carries the
+     * setting in the URL rather than a Properties key (jdbc-v2 uses
+     * {@code clickhouse_setting_*} properties; this driver's Properties only carry
+     * credentials).
+     */
+    @Test
+    void serverSettingFromUrlIsEnforcedByServer() throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                        url() + "?settings.max_result_rows=5");
+                Statement st = conn.createStatement()) {
+            // Asserting Exception (not SQLException) keeps this test focused on the
+            // setting-enforcement dimension; the exception TYPE defect is documented
+            // separately by knownBug_deferredServerErrorMustSurfaceAsSqlException.
+            Exception e = assertThrows(Exception.class, () -> {
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT toInt32(number) FROM system.numbers LIMIT 20")) {
+                    while (rs.next()) {
+                        // drain: the overflow error may surface during iteration
+                    }
+                }
+            });
+            ServerException server = serverException(e);
+            assertNotNull(server, "expected a server-side overflow error: " + e);
+            assertEquals(396, server.code(),
+                    "expected TOO_MANY_ROWS_OR_BYTES (396) but got: " + e.getMessage());
+        }
+    }
+
+    /**
+     * KNOWN BUG (expected failure, documents the defect): every error a ResultSet
+     * surfaces must be a {@link SQLException} per the JDBC contract of
+     * {@link ResultSet#next()}.
+     *
+     * <p>Actual behavior today: when the server reports an error mid-stream (here
+     * TOO_MANY_ROWS_OR_BYTES, 396, deferred until rows have already been produced),
+     * {@code ChResultSet.next()} lets the core's raw
+     * {@link io.github.danielbunting.clickhouse.ServerException} (a RuntimeException)
+     * escape from the underlying block iterator
+     * ({@code QueryResultImpl.BlockIterator.hasNext} → {@code ChResultSet.next},
+     * clickhouse-native-client-jdbc/src/main/java/io/github/danielbunting/clickhouse/jdbc/ChResultSet.java).
+     *
+     * <p>How to fix: in {@code ChResultSet.next()} (and any other method that pulls
+     * from the core iterator), catch {@code RuntimeException} and rethrow as
+     * {@code new SQLException(...)} with the cause chained — mirroring what
+     * {@code ClickHouseDriver.connect} and {@code ChConnection.close} already do. This
+     * test passes once the wrap is in place.
+     */
+    @Test
+    void knownBug_deferredServerErrorMustSurfaceAsSqlException() throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                        url() + "?settings.max_result_rows=5");
+                Statement st = conn.createStatement()) {
+            SQLException e = assertThrows(SQLException.class, () -> {
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT toInt32(number) FROM system.numbers LIMIT 20")) {
+                    while (rs.next()) {
+                        // drain until the deferred server error surfaces
+                    }
+                }
+            });
+            ServerException server = serverException(e);
+            assertNotNull(server, "the SQLException must chain the server error: " + e);
+            assertEquals(396, server.code());
+        }
+    }
+
+    /**
+     * A connection-level setting is visible to the session via {@code getSetting()}
+     * (reference: jdbc-v2 ConnectionTest#testCustomParameters, which uses a
+     * {@code custom_*} setting; a stock server only accepts registered settings, so a
+     * built-in one is used here).
+     */
+    @Test
+    void serverSettingFromUrlIsReadableViaGetSetting() throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                        url() + "?settings.session_timezone=Asia/Tokyo");
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT getSetting('session_timezone')")) {
+            assertTrue(rs.next());
+            assertEquals("Asia/Tokyo", rs.getString(1));
+        }
+    }
+
+    /**
+     * DEVIATION from jdbc-v2 over HTTP (DriverTest#testUnknownSettings expects
+     * UNKNOWN_SETTING, 115): this driver sends connection settings on the native
+     * protocol with flags=0 (not IMPORTANT), and the server skips unknown
+     * non-important settings instead of failing the query. Pinned; if the client ever
+     * marks settings IMPORTANT this will start failing with 115.
+     */
+    @Test
+    void unknownServerSettingFromUrlIsIgnoredByServer() throws Exception {
+        try (Connection conn = DriverManager.getConnection(
+                        url() + "?settings.jdbc_session_no_such_setting=1");
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT 1")) {
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 13. database property vs URL path (reference: jdbc-v2 ConnectionTest#testSelectingDatabase)
+    // ------------------------------------------------------------------
+
+    /**
+     * DEVIATION from jdbc-v2 (where a {@code database} property participates in
+     * database selection): this driver's config parser only merges
+     * user/username/password from the Properties, so a {@code database} property does
+     * NOT change the native session's database — the URL path always wins. The property
+     * still seeds JDBC-side {@code getCatalog()}/{@code getSchema()}, which is pinned
+     * here too (see ChConnection's constructor).
+     */
+    @Test
+    void databasePropertyDoesNotChangeSessionDatabase() throws Exception {
+        Properties props = new Properties();
+        props.setProperty("database", "system");
+        try (Connection conn = DriverManager.getConnection(url(), props)) {
+            assertEquals("default", currentDatabase(conn),
+                    "the URL path database wins; the property must not reroute the session");
+            assertEquals("system", conn.getCatalog(),
+                    "catalog is derived from the database property only");
+            assertEquals("system", conn.getSchema(),
+                    "schema is derived from the database property only");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 14. DataSource happy path (reference: jdbc-v2 DataSourceTest#testGetConnectionWithUserAndPassword)
+    // ------------------------------------------------------------------
+
+    /** Creates (idempotently) the plaintext-password user shared by the DataSource tests. */
+    private static void createDataSourceUser() throws SQLException {
+        try (Connection admin = connect(); Statement st = admin.createStatement()) {
+            st.execute("DROP USER IF EXISTS jdbc_session_ds_user");
+            st.execute("CREATE USER jdbc_session_ds_user IDENTIFIED WITH plaintext_password "
+                    + "BY 'ds-pass'");
+        }
+    }
+
+    /**
+     * {@code getConnection(user, password)} authenticates against a live server and
+     * hands out a working connection; bad credentials fail with an SQLException
+     * chaining the server's AUTHENTICATION_FAILED error.
+     */
+    @Test
+    void dataSourceGetConnectionUserPasswordOverloadAuthenticates() throws Exception {
+        createDataSourceUser();
+
+        ChDataSource ds = new ChDataSource(url());
+        try (Connection conn = ds.getConnection("jdbc_session_ds_user", "ds-pass");
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT currentUser()")) {
+            assertTrue(rs.next());
+            assertEquals("jdbc_session_ds_user", rs.getString(1));
+        }
+
+        SQLException e = assertThrows(SQLException.class,
+                () -> ds.getConnection("jdbc_session_ds_user", "wrong").close());
+        ServerException server = serverException(e);
+        assertNotNull(server, "auth failure must chain the server error: " + e);
+        assertEquals(516, server.code());
+    }
+
+    /**
+     * KNOWN BUG (expected failure, documents the defect): a no-arg
+     * {@code getConnection()} must authenticate with the credentials supplied to the
+     * DataSource constructor (jdbc-v2 DataSourceTest#testGetConnectionWithUserAndPassword
+     * semantics; also the {@code javax.sql.DataSource} contract — the DataSource holds
+     * the configuration).
+     *
+     * <p>Actual behavior today: it connects as {@code default}. Two defects conspire in
+     * the delegation chain
+     * ({@code ChDataSource.getConnection()} →
+     * clickhouse-native-client-jdbc/src/main/java/io/github/danielbunting/clickhouse/jdbc/ChDataSource.java):
+     * {@code getConnection()} passes {@code new Properties(properties)}, which stores
+     * the configured entries only as <em>defaults</em> of an empty table, and
+     * {@code ClickHouseConfig.fromUrl(url, info)}
+     * (clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt)
+     * short-circuits on {@code info.isEmpty} — {@code Hashtable.isEmpty()} ignores
+     * defaults — so the user/password never reach the config.
+     *
+     * <p>How to fix (either suffices; the first is safest): in
+     * {@code ChDataSource.getConnection()}, copy the entries for real —
+     * {@code Properties copy = new Properties(); copy.putAll(properties);} — instead of
+     * wrapping them as defaults; and/or in {@code ClickHouseConfig.fromUrl(url, info)}
+     * drop the {@code info.isEmpty} short-circuit and rely on
+     * {@code getProperty(...)} (which does consult defaults) returning null. This test
+     * passes once fixed.
+     */
+    @Test
+    void knownBug_dataSourceGetConnectionMustUseConstructorProperties() throws Exception {
+        createDataSourceUser();
+
+        Properties props = new Properties();
+        props.setProperty("user", "jdbc_session_ds_user");
+        props.setProperty("password", "ds-pass");
+        ChDataSource ds = new ChDataSource(url(), props);
+        try (Connection conn = ds.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT currentUser()")) {
+            assertTrue(rs.next());
+            assertEquals("jdbc_session_ds_user", rs.getString(1),
+                    "getConnection() must use the constructor Properties");
         }
     }
 }

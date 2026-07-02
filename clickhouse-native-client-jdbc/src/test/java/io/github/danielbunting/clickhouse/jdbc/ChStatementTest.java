@@ -121,23 +121,30 @@ class ChStatementTest {
     }
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): per the jdbc-v2 matrix
+     * KNOWN BUG (fails until fixed): per the jdbc-v2 matrix
      * (BaseSqlParserFacadeTest#testStatementsForResultSet and the CTE suite), EXPLAIN
      * and CHECK statements and parenthesized SELECT/WITH queries all produce result
-     * sets, but the prefix classifier does not recognise them and routes them to the
-     * update path. Flip these assertions when the classifier learns these forms.
+     * sets.
+     *
+     * <p>Expected: {@code producesResultSet} returns {@code true} for every statement
+     * below. Actual: the prefix classifier does not recognise these forms and returns
+     * {@code false}, routing them to the update path.
+     *
+     * <p>Fix: in {@link ChStatement#producesResultSet} (ChStatement.java), add
+     * {@code EXPLAIN} and {@code CHECK} to the recognised keyword prefixes, and skip
+     * any leading {@code '('} characters (after whitespace/comments) before sniffing
+     * the keyword so parenthesized queries classify by their inner keyword.
      */
     @Test
     void knownBug_producesResultSetMisclassifiesExplainCheckAndParenthesizedQueries() {
-        // Should all be true.
-        assertFalse(ChStatement.producesResultSet("EXPLAIN SELECT 1"));
-        assertFalse(ChStatement.producesResultSet("EXPLAIN AST SELECT 1"));
-        assertFalse(ChStatement.producesResultSet(
+        assertTrue(ChStatement.producesResultSet("EXPLAIN SELECT 1"));
+        assertTrue(ChStatement.producesResultSet("EXPLAIN AST SELECT 1"));
+        assertTrue(ChStatement.producesResultSet(
                 "EXPLAIN SELECT sum(number) FROM numbers(10) GROUP BY number"));
-        assertFalse(ChStatement.producesResultSet("CHECK TABLE test_table"));
-        assertFalse(ChStatement.producesResultSet("CHECK GRANT SELECT(col2) ON table_2"));
-        assertFalse(ChStatement.producesResultSet("(SELECT 1)"));
-        assertFalse(ChStatement.producesResultSet("(with a as (select 1) select * from a)"));
+        assertTrue(ChStatement.producesResultSet("CHECK TABLE test_table"));
+        assertTrue(ChStatement.producesResultSet("CHECK GRANT SELECT(col2) ON table_2"));
+        assertTrue(ChStatement.producesResultSet("(SELECT 1)"));
+        assertTrue(ChStatement.producesResultSet("(with a as (select 1) select * from a)"));
     }
 
     /**
@@ -161,30 +168,48 @@ class ChStatementTest {
     // jdbc-v2 StatementTest#testNewLineSQLParsing) -----------------------------
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): {@code producesResultSet} sniffs
-     * the first keyword after stripping leading <em>whitespace only</em>, so SQL that
-     * begins with a {@code --}/{@code #} line comment or a block comment is
-     * misclassified as non-result-producing. Per the clickhouse-java reference
-     * (jdbc-v2 StatementTest#testNewLineSQLParsing) every comment-prefixed query
-     * below should classify {@code true}. Flip these assertions when the classifier
-     * learns to skip leading comments.
+     * KNOWN BUG (fails until fixed): {@code producesResultSet} sniffs the first
+     * keyword after stripping leading <em>whitespace only</em>, so SQL that begins
+     * with a {@code --}/{@code #}/{@code #!} line comment is misclassified as
+     * non-result-producing.
+     *
+     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): every line-comment-
+     * prefixed query below classifies {@code true}. Actual: {@code false}.
+     *
+     * <p>Fix: in {@link ChStatement#producesResultSet} (ChStatement.java), before the
+     * keyword sniff, loop skipping leading whitespace and {@code --}/{@code #}/
+     * {@code #!} line comments (up to and including the next {@code \n}) until real
+     * SQL text is reached.
      */
     @Test
-    void knownBug_producesResultSetMisclassifiesCommentPrefixedQueries() {
-        // Line-comment prefixes: should all be true.
-        assertFalse(ChStatement.producesResultSet("-- comment\nSELECT 1"));
-        assertFalse(ChStatement.producesResultSet(
+    void knownBug_producesResultSet_lineCommentPrefixHidesKeyword() {
+        assertTrue(ChStatement.producesResultSet("-- comment\nSELECT 1"));
+        assertTrue(ChStatement.producesResultSet(
                 "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;"));
-        assertFalse(ChStatement.producesResultSet(
+        assertTrue(ChStatement.producesResultSet(
                 "-- SELECT * FROM balance\n\nWITH balance_cte AS (SELECT 1) SELECT * FROM balance_cte;"));
-        assertFalse(ChStatement.producesResultSet("# hash comment\nSELECT 1"));
-        // Block-comment prefixes: should all be true (ClickHouse block comments nest).
-        assertFalse(ChStatement.producesResultSet("/* c */ SELECT 1"));
-        assertFalse(ChStatement.producesResultSet("/* outer /* nested */ still comment */ SELECT 1"));
-        assertFalse(ChStatement.producesResultSet("\n\t /* c */\n-- more\nSHOW TABLES"));
-        // Correct today and must stay false either way: keyword only inside the comment.
-        assertFalse(ChStatement.producesResultSet("-- SELECT looks like a query\nINSERT INTO t VALUES (1)"));
-        assertFalse(ChStatement.producesResultSet("/* SELECT */ INSERT INTO t VALUES (1)"));
+        assertTrue(ChStatement.producesResultSet("# hash comment\nSELECT 1"));
+        assertTrue(ChStatement.producesResultSet("#! shebang-style comment\nSELECT 1"));
+    }
+
+    /**
+     * KNOWN BUG (fails until fixed): companion to the line-comment case — SQL that
+     * begins with a {@code /* *}{@code /} block comment (ClickHouse block comments
+     * nest) is misclassified as non-result-producing.
+     *
+     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): every block-comment-
+     * prefixed query below classifies {@code true}. Actual: {@code false}.
+     *
+     * <p>Fix: same place as the line-comment fix — in
+     * {@link ChStatement#producesResultSet} (ChStatement.java), skip leading
+     * {@code /* *}{@code /} blocks with a nesting-depth counter before sniffing the
+     * keyword.
+     */
+    @Test
+    void knownBug_producesResultSet_blockCommentPrefixHidesKeyword() {
+        assertTrue(ChStatement.producesResultSet("/* c */ SELECT 1"));
+        assertTrue(ChStatement.producesResultSet("/* outer /* nested */ still comment */ SELECT 1"));
+        assertTrue(ChStatement.producesResultSet("\n\t /* c */\n-- more\nSHOW TABLES"));
     }
 
     @Test
@@ -193,6 +218,10 @@ class ChStatementTest {
         assertFalse(ChStatement.producesResultSet(" \n\t\r"));
         assertFalse(ChStatement.producesResultSet("-- only a comment"));
         assertFalse(ChStatement.producesResultSet("/* unterminated comment SELECT 1"));
+        // A keyword that appears only INSIDE a comment must never classify as a query,
+        // with or without the comment-skipping fix.
+        assertFalse(ChStatement.producesResultSet("-- SELECT looks like a query\nINSERT INTO t VALUES (1)"));
+        assertFalse(ChStatement.producesResultSet("/* SELECT */ INSERT INTO t VALUES (1)"));
     }
 
     @Test
@@ -326,20 +355,27 @@ class ChStatementTest {
     }
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): because {@code producesResultSet}
-     * does not skip leading comments, {@code execute()} sends a comment-prefixed
-     * SELECT down the <em>update</em> path ({@code core().execute}) and reports no
-     * result set. Per jdbc-v2 StatementTest#testNewLineSQLParsing it should return
-     * {@code true} and ride the query path. Flip this when the classifier is fixed.
+     * KNOWN BUG (fails until fixed): because {@code producesResultSet} does not skip
+     * leading comments, {@code execute()} sends a comment-prefixed SELECT down the
+     * <em>update</em> path ({@code core().execute}) and reports no result set.
+     *
+     * <p>Expected (jdbc-v2 StatementTest#testNewLineSQLParsing): {@code execute()}
+     * returns {@code true} and the SQL is routed to {@code core().query}. Actual:
+     * returns {@code false} and the SQL goes to {@code core().execute}.
+     *
+     * <p>Fix: same as the classification bug — make
+     * {@link ChStatement#producesResultSet} (ChStatement.java) skip leading
+     * whitespace, line comments, and nested block comments before keyword sniffing;
+     * {@code execute(String)} then routes correctly with no further change.
      */
     @Test
     void knownBug_executeRoutesCommentPrefixedSelectToUpdatePath() throws SQLException {
         RecordingCore core = new RecordingCore();
         ChStatement s = connected(core);
         String sql = "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;";
-        assertFalse(s.execute(sql), "should be true once comment-aware");
-        assertEquals(List.of(sql), core.executed, "should be routed to query(), not execute()");
-        assertTrue(core.queried.isEmpty());
+        assertTrue(s.execute(sql), "a comment-prefixed SELECT must report a result set");
+        assertEquals(List.of(sql), core.queried, "must be routed to query(), not execute()");
+        assertTrue(core.executed.isEmpty(), "the update path must not see the query");
     }
 
     @Test

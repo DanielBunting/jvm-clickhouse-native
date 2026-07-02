@@ -56,6 +56,42 @@ class ChParameterMetaDataTest {
         assertEquals(ParameterMetaData.parameterModeIn, md.getParameterMode(1));
     }
 
+    /**
+     * KNOWN BUG (fails until fixed): JDBC contract (reference: jdbc-v2
+     * ParameterMetaDataImplTest) — every per-parameter accessor must throw
+     * {@link SQLException} for parameter index 0 and for indexes beyond
+     * {@code getParameterCount()}.
+     *
+     * <p>Expected: each accessor below throws SQLException for indexes 0, 2 (count+1)
+     * and 99. Actual: the anonymous ParameterMetaData in
+     * {@code ChPreparedStatement.getParameterMetaData} performs no index validation
+     * and returns its fixed default for any index.
+     *
+     * <p>Fix: in {@code ChPreparedStatement.getParameterMetaData}
+     * (ChPreparedStatement.java), add a shared {@code checkIndex(int param)} helper to
+     * the anonymous class that throws {@code new SQLException("Parameter index " +
+     * param + " out of range [1, " + parameterCount + "]")} when {@code param < 1 ||
+     * param > parameterCount}, and call it first in every per-parameter accessor.
+     */
+    @Test
+    void knownBug_indexRangeIsNotValidated() throws SQLException {
+        ParameterMetaData md = ps("SELECT ?").getParameterMetaData();
+        assertEquals(1, md.getParameterCount());
+        for (int idx : new int[] {0, 2, 99}) {
+            String at = "index " + idx;
+            assertThrows(SQLException.class, () -> md.isNullable(idx), at);
+            assertThrows(SQLException.class, () -> md.isSigned(idx), at);
+            assertThrows(SQLException.class, () -> md.getPrecision(idx), at);
+            assertThrows(SQLException.class, () -> md.getScale(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterType(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterTypeName(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterClassName(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterMode(idx), at);
+        }
+        // In-range access must keep working.
+        assertEquals(ParameterMetaData.parameterNullableUnknown, md.isNullable(1));
+    }
+
     @Test
     void wrapperContract() throws SQLException {
         ParameterMetaData md = ps("SELECT ?").getParameterMetaData();

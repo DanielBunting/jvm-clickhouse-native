@@ -115,6 +115,197 @@ final class ClickHouseConfigFromUrlTest {
     }
 
     // -----------------------------------------------------------------------
+    // Credentials: colons and percent-encoding
+    // (reference: v1 ClickHouseJdbcUrlParserTest#testParseCredentials)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Only the first colon separates user from password, so a password may itself
+     * contain colons.
+     */
+    @Test
+    void passwordContainingColon_splitAtFirstColon() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://user:a:passwd@foo.ch/test");
+
+        assertEquals("user", cfg.username());
+        assertEquals("a:passwd", cfg.password());
+        assertEquals("foo.ch", cfg.host());
+        assertEquals("test", cfg.database());
+    }
+
+    /**
+     * Percent-encoded characters in the password are decoded ({@code %40} → {@code @},
+     * {@code %3A} → {@code :}).
+     */
+    @Test
+    void percentEncodedPassword_decoded() {
+        ClickHouseConfig cfg =
+                ClickHouseConfig.fromUrl("chnative://alice:let%40me%3Ain@host:9000/db");
+
+        assertEquals("alice", cfg.username());
+        assertEquals("let@me:in", cfg.password());
+    }
+
+    /**
+     * KNOWN BUG (expected failure, documents the defect): a percent-encoded colon in
+     * the USERNAME ({@code let%3Ame}) must decode into the username — RFC 3986 reserves
+     * only the <em>literal</em> colon as the user/password separator, and the reference
+     * parser (v1 ClickHouseJdbcUrlParserTest#testParseCredentials) yields username
+     * {@code "let:me"} for {@code let%3Ame}.
+     *
+     * <p>Actual behavior today: {@code ClickHouseConfig.fromUrl} (companion object in
+     * {@code clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt})
+     * reads {@code uri.userInfo}, which is already percent-DECODED, and then splits at
+     * the first colon — so the decoded {@code %3A} is mis-treated as the separator,
+     * producing username {@code "let"} and password {@code "me:pw"}.
+     *
+     * <p>How to fix: in {@code fromUrl}, use {@code uri.rawUserInfo} instead, split it
+     * at the first literal {@code ':'}, then percent-decode the user and password parts
+     * separately (e.g. {@code URLDecoder.decode(part, StandardCharsets.UTF_8)}). This
+     * test passes once that is done.
+     */
+    @Test
+    void knownBug_percentEncodedColonInUsername_shouldDecodeIntoUsername() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://let%3Ame:pw@host/db");
+
+        assertEquals("let:me", cfg.username());
+        assertEquals("pw", cfg.password());
+    }
+
+    /**
+     * A percent-encoded {@code @} in the username decodes correctly, because the
+     * authority is split on the last literal {@code @}.
+     */
+    @Test
+    void percentEncodedAtInUsername_decoded() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://a%40corp:pw@host/db");
+
+        assertEquals("a@corp", cfg.username());
+        assertEquals("pw", cfg.password());
+        assertEquals("host", cfg.host());
+    }
+
+    // -----------------------------------------------------------------------
+    // Underscore hostnames
+    // (reference: client-v2 ClientBuilderTest#testAddEndpointToleratesUnderscoreHostname,
+    //  HttpEndpointTest#testUnderscoreHostIsAcceptedInUri /
+    //  #testUrlEndpointPreservesUnderscoreHost, HttpTransportTests#testHostnameWithUnderscore
+    //  — java.net.URI.getHost() returns null for hosts containing '_', which broke the
+    //  reference client until it stopped relying on getHost())
+    // -----------------------------------------------------------------------
+
+    /**
+     * A hostname containing underscores (common for Docker/K8s service names) must parse
+     * correctly even though {@code java.net.URI.getHost()} returns {@code null} for it.
+     * This client extracts the host list with its own authority parser, so the host,
+     * port, database, and query parameters all survive.
+     */
+    @Test
+    void underscoreHostname_parsed() {
+        ClickHouseConfig cfg =
+                ClickHouseConfig.fromUrl("chnative://host_with_underscore:9000/db?compression=zstd");
+
+        assertEquals("host_with_underscore", cfg.host());
+        assertEquals(9000, cfg.port());
+        assertEquals("db", cfg.database());
+        assertEquals(CompressionMethod.ZSTD, cfg.compression());
+    }
+
+    /** An underscore hostname without an explicit port falls back to the default 9000. */
+    @Test
+    void underscoreHostnameWithoutPort_defaultPort() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://my_host/analytics");
+
+        assertEquals("my_host", cfg.host());
+        assertEquals(9000, cfg.port());
+        assertEquals("analytics", cfg.database());
+    }
+
+    /**
+     * KNOWN BUG (expected failure, documents the defect): credentials in a URL whose
+     * host contains an underscore must still be parsed. The reference client had this
+     * exact class of bug (client-v2 ClientBuilderTest#testAddEndpointToleratesUnderscoreHostname):
+     * {@code java.net.URI} refuses to server-parse an authority whose hostname contains
+     * {@code '_'}, falls back to a REGISTRY-based authority, and then returns {@code null}
+     * from {@code getUserInfo()} (and {@code getHost()}/{@code getPort()}).
+     *
+     * <p>Actual behavior today: {@code ClickHouseConfig.fromUrl} (companion object in
+     * {@code clickhouse-native-client/src/main/kotlin/io/github/danielbunting/clickhouse/ClickHouseConfig.kt})
+     * extracts host/port with its own authority parser (so they survive), but reads the
+     * credentials from {@code uri.userInfo} — which is {@code null} here — so the username
+     * and password are SILENTLY DROPPED and the defaults ({@code "default"} / {@code ""})
+     * are used. Verified: {@code new URI("http://alice:pw@host_with_underscore:9000/db").getUserInfo()}
+     * returns {@code null} while the same URL with a plain host returns {@code "alice:pw"}.
+     *
+     * <p>How to fix: in {@code fromUrl}, stop relying on {@code uri.userInfo}. The
+     * authority text is already isolated by {@code extractHostList}'s logic — take the
+     * substring before the last literal {@code '@'} (if any) of the raw authority, split
+     * it at the first literal {@code ':'}, and percent-decode user and password separately
+     * (which also fixes {@link #knownBug_percentEncodedColonInUsername_shouldDecodeIntoUsername}).
+     * This test passes once that is done.
+     */
+    @Test
+    void knownBug_underscoreHostWithCredentials_shouldPreserveCredentials() {
+        ClickHouseConfig cfg =
+                ClickHouseConfig.fromUrl("chnative://alice:s3cr3t@host_with_underscore:9000/db");
+
+        assertEquals("host_with_underscore", cfg.host());
+        assertEquals(9000, cfg.port());
+        assertEquals("db", cfg.database());
+        assertEquals("alice", cfg.username());
+        assertEquals("s3cr3t", cfg.password());
+    }
+
+    // -----------------------------------------------------------------------
+    // Database path encoding
+    // (reference: jdbc-v2 JdbcConfigurationTest#testParseURLValid)
+    // -----------------------------------------------------------------------
+
+    /** A percent-encoded database path segment is decoded. */
+    @Test
+    void percentEncodedDatabase_decoded() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://host/my%20db");
+        assertEquals("my db", cfg.database());
+    }
+
+    // -----------------------------------------------------------------------
+    // IPv6 hosts (reference: jdbc-v2 JdbcConfigurationTest#testParseURLValid)
+    // -----------------------------------------------------------------------
+
+    /** A bracketed IPv6 literal with an explicit port. */
+    @Test
+    void ipv6HostWithPort_parsed() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[::1]:9100/db");
+
+        assertEquals("::1", cfg.host());
+        assertEquals(9100, cfg.port());
+        assertEquals("db", cfg.database());
+    }
+
+    /** A bracketed IPv6 literal without a port defaults to 9000. */
+    @Test
+    void ipv6HostWithoutPort_defaultPort() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[2001:db8::1]/db");
+
+        assertEquals("2001:db8::1", cfg.host());
+        assertEquals(9000, cfg.port());
+    }
+
+    /** An unterminated IPv6 literal must throw. */
+    @Test
+    void ipv6Unterminated_throws() {
+        assertThrows(ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative://[::1:9100/db"));
+    }
+
+    /** Trailing junk after the closing bracket that is not a {@code :port} must throw. */
+    @Test
+    void ipv6TrailingJunk_throws() {
+        assertThrows(ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative://[::1]x/db"));
+    }
+
+    // -----------------------------------------------------------------------
     // Malformed URL — must throw ClickHouseException
     // -----------------------------------------------------------------------
 
@@ -189,6 +380,22 @@ final class ClickHouseConfigFromUrlTest {
                 () -> ClickHouseConfig.fromUrl("chnative://host?unknownParam=value"));
     }
 
+    /** A URL with an empty authority (no host) must throw. */
+    @Test
+    void missingHost_throws() {
+        assertThrows(ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative:///db"));
+        assertThrows(ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative://"));
+    }
+
+    /** A non-numeric port must throw. */
+    @Test
+    void nonNumericPort_throws() {
+        assertThrows(ClickHouseException.class,
+                () -> ClickHouseConfig.fromUrl("chnative://host:port/db"));
+    }
+
     // -----------------------------------------------------------------------
     // TLS
     // -----------------------------------------------------------------------
@@ -261,5 +468,34 @@ final class ClickHouseConfigFromUrlTest {
     void sslmodeUnknown_throws() {
         assertThrows(ClickHouseException.class,
                 () -> ClickHouseConfig.fromUrl("chnative://host?sslmode=bogus"));
+    }
+
+    /**
+     * Full {@code sslmode} alias matrix (reference: jdbc-v2
+     * JdbcConfigurationTest#testSSLModeProperty): every documented alias maps to the
+     * expected TLS/verification combination, case-insensitively.
+     */
+    @Test
+    void sslmodeAliases_mapToExpectedTlsFlags() {
+        // TLS off
+        for (String mode : new String[] {"none", "disable", "DISABLE"}) {
+            ClickHouseConfig cfg =
+                    ClickHouseConfig.fromUrl("chnative://host?sslmode=" + mode);
+            assertFalse(cfg.tls(), "sslmode=" + mode);
+        }
+        // TLS on, verification intact
+        for (String mode : new String[] {"strict", "verify-full", "require", "true", "STRICT"}) {
+            ClickHouseConfig cfg =
+                    ClickHouseConfig.fromUrl("chnative://host?sslmode=" + mode);
+            assertTrue(cfg.tls(), "sslmode=" + mode);
+            assertFalse(cfg.insecureSkipVerify(), "sslmode=" + mode);
+        }
+        // TLS on, dev-only trust-all
+        for (String mode : new String[] {"none-verify", "insecure"}) {
+            ClickHouseConfig cfg =
+                    ClickHouseConfig.fromUrl("chnative://host?sslmode=" + mode);
+            assertTrue(cfg.tls(), "sslmode=" + mode);
+            assertTrue(cfg.insecureSkipVerify(), "sslmode=" + mode);
+        }
     }
 }

@@ -64,6 +64,25 @@ class EndpointSelectorTest {
                 "bracketed IPv6 literal without an explicit port defaults to 9000, not mis-parsed");
     }
 
+    /**
+     * Underscore hostnames (reference: client-v2 HttpEndpointTest — underscore hosts make
+     * {@code java.net.URI.getHost()} return null) survive multi-endpoint parsing, because
+     * the endpoint list is extracted with the client's own authority parser.
+     */
+    @Test
+    void parsesUnderscoreHostsInEndpointList() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl(
+                "chnative://ch_node_1:9000,ch_node_2:9001,plain-host/db");
+
+        assertEquals(
+                List.of(new Endpoint("ch_node_1", 9000),
+                        new Endpoint("ch_node_2", 9001),
+                        new Endpoint("plain-host", 9000)),
+                cfg.endpoints(),
+                "underscore hosts must not be dropped or nulled by java.net.URI host parsing");
+        assertEquals("db", cfg.database());
+    }
+
     @Test
     void parsesMixedIpv6AndIpv4EndpointList() {
         ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[::1]:9000,10.0.0.5:9001/db");

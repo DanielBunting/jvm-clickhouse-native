@@ -182,6 +182,32 @@ class ChResultSetContractTest {
     }
 
     // ------------------------------------------------------------------
+    // findColumn (jdbc-v2 ResultSetImplTest#shouldReturnColumnIndex)
+    // ------------------------------------------------------------------
+
+    @Test
+    void findColumnReturnsOneBasedIndex() throws SQLException {
+        Int32Codec codec = new Int32Codec();
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("id", "Int32", codec, 1),
+                RsFixtures.complexCol("val", "Int32", codec, 10));
+
+        // Resolvable before the cursor is positioned, and stable across rows.
+        assertEquals(1, rs.findColumn("id"));
+        assertEquals(2, rs.findColumn("val"));
+        assertTrue(rs.next());
+        assertEquals(1, rs.findColumn("id"));
+        assertEquals(1, rs.getInt(rs.findColumn("id")));
+        assertEquals(10, rs.getInt(rs.findColumn("val")));
+
+        // Label matching is case-insensitive (JDBC label semantics).
+        assertEquals(2, rs.findColumn("VAL"));
+
+        // An unknown label is an SQLException, not -1/0.
+        assertThrows(SQLException.class, () -> rs.findColumn("nope"));
+    }
+
+    // ------------------------------------------------------------------
     // Cursor position
     // ------------------------------------------------------------------
 
@@ -253,13 +279,25 @@ class ChResultSetContractTest {
         assertEquals(0, rs.getFetchSize(), "blocks are server-sized; no client fetch size");
         rs.setFetchSize(10);
         assertEquals(0, rs.getFetchSize(), "setFetchSize hint is ignored");
-        // Deliberate contract: the hint is ignored wholesale, negatives included
-        // (reference jdbc-v2 instead rejects negative sizes with an SQLException).
-        rs.setFetchSize(-1);
-        assertEquals(0, rs.getFetchSize());
-        // Always detached from the producing statement, so there is no statement
-        // fetch size to inherit (jdbc-v1 testFetchSizeOfDetachedResultSet analogue).
-        assertNull(rs.getStatement());
+    }
+
+    /**
+     * KNOWN BUG (fails until fixed): JDBC spec (and jdbc-v2 ResultSetImplTest) — a
+     * negative fetch size is invalid and {@code setFetchSize(-1)} must throw
+     * {@link SQLException}. The positive-value hint may still be ignored.
+     *
+     * <p>Expected: SQLException. Actual: {@code ChResultSet.setFetchSize} is a total
+     * no-op and silently accepts the negative value.
+     *
+     * <p>Fix: in {@code ChResultSet.setFetchSize(int)} (ChResultSet.java), throw
+     * {@code new SQLException("fetchSize must be >= 0")} for negative arguments —
+     * mirroring the existing validation in {@code ChStatement.setFetchSize}.
+     */
+    @Test
+    void knownBug_negativeFetchSizeIsSilentlyAccepted() {
+        ChResultSet rs = rows(1);
+        assertThrows(SQLException.class, () -> rs.setFetchSize(-1),
+                "a negative fetch size must be rejected");
     }
 
     // ------------------------------------------------------------------
@@ -272,10 +310,100 @@ class ChResultSetContractTest {
         assertEquals(ResultSet.TYPE_FORWARD_ONLY, rs.getType());
         assertEquals(ResultSet.CONCUR_READ_ONLY, rs.getConcurrency());
         assertEquals(ResultSet.CLOSE_CURSORS_AT_COMMIT, rs.getHoldability());
-        assertNull(rs.getStatement(), "result set is detached from the producing statement");
+        // This fixture is genuinely detached (built straight from blocks, no
+        // Statement involved), so null is the correct answer HERE. The
+        // statement-produced case is knownBug_getStatementReturnsNullForStatementProducedResultSet.
+        assertNull(rs.getStatement(), "a genuinely detached fixture has no statement");
         assertThrows(SQLFeatureNotSupportedException.class, rs::getCursorName);
         assertNull(rs.getWarnings());
         rs.clearWarnings(); // no-op
         assertNull(rs.getWarnings());
+    }
+
+    // ------------------------------------------------------------------
+    // getStatement for statement-produced result sets
+    // ------------------------------------------------------------------
+
+    /**
+     * KNOWN BUG (fails until fixed): JDBC spec ({@link ResultSet#getStatement()}) —
+     * a result set produced by a {@link java.sql.Statement} must return that
+     * statement; only result sets produced "some other way" may return null.
+     *
+     * <p>Expected: {@code rs.getStatement()} returns the {@code ChStatement} whose
+     * {@code executeQuery} produced it. Actual: {@code ChResultSet.getStatement()}
+     * unconditionally returns null.
+     *
+     * <p>Fix: give {@code ChResultSet} (ChResultSet.java) an optional owning
+     * {@code Statement} field — pass {@code this} at the construction sites in
+     * {@code ChStatement.executeQuery} and {@code ChPreparedStatement.executeQuery}
+     * (keeping a detached constructor for statement-free producers) — and return it
+     * from {@code getStatement()}.
+     */
+    @Test
+    void knownBug_getStatementReturnsNullForStatementProducedResultSet() throws SQLException {
+        ChConnection conn = new ChConnection(new EmptyQueryCore(),
+                "jdbc:chnative://localhost:9000/default", new java.util.Properties());
+        ChStatement stmt = new ChStatement(conn);
+        ResultSet rs = stmt.executeQuery("SELECT 1");
+        assertSame(stmt, rs.getStatement(),
+                "a statement-produced result set must return its producing statement");
+    }
+
+    /** A core connection whose query() returns an empty result, for building attached RSs. */
+    private static final class EmptyQueryCore
+            implements io.github.danielbunting.clickhouse.ClickHouseConnection {
+        @Override
+        public long executeScalar(String sql) {
+            return 0;
+        }
+
+        @Override
+        public void execute(String sql) {
+        }
+
+        @Override
+        public io.github.danielbunting.clickhouse.QueryResult query(String sql) {
+            return new io.github.danielbunting.clickhouse.QueryResult() {
+                @Override
+                public java.util.List<String> columnNames() {
+                    return java.util.List.of();
+                }
+
+                @Override
+                public java.util.List<String> columnTypes() {
+                    return java.util.List.of();
+                }
+
+                @Override
+                public java.util.Iterator<io.github.danielbunting.clickhouse.protocol.Block> blocks() {
+                    return java.util.Collections.emptyIterator();
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+        }
+
+        @Override
+        public <T> java.util.stream.Stream<T> query(String sql, Class<T> type) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public <T> io.github.danielbunting.clickhouse.BulkInserter<T> createBulkInserter(
+                String table, Class<T> type) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<io.github.danielbunting.clickhouse.QueryResult>
+                queryAsync(String sql) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

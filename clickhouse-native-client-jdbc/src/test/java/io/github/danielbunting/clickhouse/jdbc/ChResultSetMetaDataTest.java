@@ -154,6 +154,41 @@ class ChResultSetMetaDataTest {
     }
 
     @Test
+    void mapAndTupleColumnsMapToOtherWithObjectClass() throws SQLException {
+        // Ported from jdbc-v2 ResultSetMetaDataImplTest.testGetColumnTypeMap /
+        // testGetColumnTypeTuple: composite types with no JDBC counterpart report
+        // Types.OTHER and java.lang.Object.
+        ChResultSetMetaData m = new ChResultSetMetaData(
+                List.of("m", "t", "nm"),
+                List.of("Map(String, Int32)", "Tuple(String, UInt8)",
+                        "Map(String, Array(Nullable(DateTime64(3))))"));
+        for (int i = 1; i <= 3; i++) {
+            assertEquals(Types.OTHER, m.getColumnType(i), "col " + i + " -> OTHER");
+            assertEquals(Object.class.getName(), m.getColumnClassName(i), "col " + i);
+        }
+        assertEquals("Map(String, Int32)", m.getColumnTypeName(1), "raw type preserved");
+    }
+
+    /**
+     * Precision for non-decimal types (reference: jdbc-v2
+     * ResultSetMetaDataImplTest#testGetColumnPrecision, where {@code SELECT 1} — a
+     * UInt8 — reports precision 3, its max digit count). DEVIATION: this driver only
+     * derives precision from {@code Decimal(P, S)}; every other type reports 0
+     * ("unknown"), not the type's digit count.
+     */
+    @Test
+    void precisionIsZeroForNonDecimalTypes() throws SQLException {
+        ChResultSetMetaData m = new ChResultSetMetaData(
+                List.of("u8", "i64", "s", "d"),
+                List.of("UInt8", "Int64", "String", "Date"));
+        for (int i = 1; i <= 4; i++) {
+            assertEquals(0, m.getPrecision(i), "col " + i + ": no derived precision");
+        }
+        // The Decimal-derived path stays intact (see precisionAndScaleDerivedFromDecimalType).
+        assertEquals(10, meta().getPrecision(3));
+    }
+
+    @Test
     void indexOutOfRangeThrows() {
         ChResultSetMetaData m = meta();
         assertThrows(SQLException.class, () -> m.getColumnName(0), "column 0 is invalid (1-based)");

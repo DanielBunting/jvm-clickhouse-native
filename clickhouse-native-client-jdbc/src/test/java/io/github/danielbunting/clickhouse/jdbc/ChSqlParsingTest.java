@@ -24,10 +24,10 @@ import org.junit.jupiter.api.Test;
  * server-side {@code {name:Type}} parameter syntax.
  *
  * <p>The scanner is single-quote-aware only. Its comment- and quoted-identifier
- * blindness is already pinned in {@link ChPreparedStatementTest}; this class pins the
- * remaining gaps it exposes (ternary {@code ?:} disambiguation, backslash-escaped
- * quotes, {@code VALUES} keyword matching inside identifiers) without duplicating
- * those pins.
+ * blindness is covered by failing {@code knownBug_} tests in
+ * {@link ChPreparedStatementTest}; this class carries the failing {@code knownBug_}
+ * tests for the remaining gaps (ternary {@code ?:} disambiguation, backslash-escaped
+ * quotes, {@code VALUES} keyword matching inside identifiers) without duplication.
  */
 class ChSqlParsingTest {
 
@@ -111,58 +111,82 @@ class ChSqlParsingTest {
     // ---- ternary ?: disambiguation ------------------------------------------
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): the scanner counts every {@code ?}
-     * outside a single-quoted literal, so the ClickHouse ternary operator
-     * {@code cond ? a : b} is miscounted as a bindable parameter. The reference parsers
-     * (v1 JdbcParameterizedQueryTest#testParseJdbcQueries, jdbc-v2
-     * BaseSqlParserFacadeTest#testParseSelectPrepared) treat ternary {@code ?} as plain
-     * text; the correct count is noted on each case. Fix the counts when the scanner
-     * learns to disambiguate the ternary operator.
+     * KNOWN BUG (fails until fixed): the scanner counts every {@code ?} outside a
+     * single-quoted literal, so the ClickHouse ternary operator {@code cond ? a : b}
+     * is miscounted as a bindable parameter.
+     *
+     * <p>Expected (v1 JdbcParameterizedQueryTest#testParseJdbcQueries, jdbc-v2
+     * BaseSqlParserFacadeTest#testParseSelectPrepared — both disambiguate): ternary
+     * {@code ?} is plain text, giving the counts asserted below. Actual: each case
+     * over-counts by one per ternary operator (3 instead of 1/2/2).
+     *
+     * <p>Fix: in the shared scan loop used by
+     * {@link ChPreparedStatement#countPlaceholders}, {@code substitute}, and
+     * {@code rewriteToNamedParams} (ChPreparedStatement.java), disambiguate with
+     * lookahead: on {@code ?}, scan forward (skipping string literals and balanced
+     * parentheses) for a {@code :} at the same nesting depth before the expression
+     * ends ({@code ,}, closing paren at lower depth, or a clause keyword) — if found,
+     * treat the {@code ?} as the ternary operator, not a parameter.
      */
     @Test
     void knownBug_countPlaceholdersCountsTernaryOperatorQuestionMarks() {
-        // Correct count: 1 (only the trailing bare '?').
-        assertEquals(3, ChPreparedStatement.countPlaceholders(
+        // Only the trailing bare '?' is a parameter.
+        assertEquals(1, ChPreparedStatement.countPlaceholders(
                 "select 1 ? 'a' : 'b', 2 ? (select 1) : 2, ?"));
-        // Correct count: 2 (WHERE '?' and abs(?)); the (true ? 1 : 0) is a ternary.
-        assertEquals(3, ChPreparedStatement.countPlaceholders(
+        // WHERE c3 = ? and abs(?); the (true ? 1 : 0) is a ternary.
+        assertEquals(2, ChPreparedStatement.countPlaceholders(
                 "SELECT c1, c2, (true ? 1 : 0 ) as foo FROM tab1 WHERE c3 = ? AND c4 = abs(?)"));
-        // Correct count: 2 (the ?(...) aggregate-function placeholder and the trailing ?).
-        assertEquals(3, ChPreparedStatement.countPlaceholders(
+        // The ?(...) aggregate-function placeholder and the trailing '?'.
+        assertEquals(2, ChPreparedStatement.countPlaceholders(
                 "select ?(number % 2 == 0 ? 1 : 0) from numbers(100) where number > ?"));
     }
 
     /**
-     * KNOWN BUG — companion to the ternary miscount: substitution splices a bound value
-     * into the ternary operator position, corrupting the statement.
+     * KNOWN BUG (fails until fixed) — companion to the ternary miscount: substitution
+     * splices the bound value into the ternary operator position.
+     *
+     * <p>Expected: with one binding, the value lands on the real trailing placeholder
+     * and the ternary is left verbatim — {@code "select 1 ? 'a' : 'b', 3"}. Actual:
+     * the ternary {@code ?} consumes the binding first, so substitution throws
+     * "Missing value for parameter 2" (and with a surplus binding produces the
+     * corrupted {@code "select 1 3 'a' : 'b', 4"}).
+     *
+     * <p>Fix: same ternary lookahead in the shared scanner of
+     * {@link ChPreparedStatement#substitute} (ChPreparedStatement.java).
      */
     @Test
     void knownBug_substituteReplacesTernaryOperatorQuestionMark() throws SQLException {
-        // With only the one real binding, the ternary '?' consumes it and the real
-        // placeholder then reports a missing parameter.
-        assertThrows(SQLException.class, () -> ChPreparedStatement.substitute(
-                "select 1 ? 'a' : 'b', ?", new Object[] {null, 3}));
-        // With a surplus binding the shift is visible: should be "select 1 ? 'a' : 'b', 3".
-        assertEquals("select 1 3 'a' : 'b', 4",
+        assertEquals("select 1 ? 'a' : 'b', 3",
                 ChPreparedStatement.substitute(
-                        "select 1 ? 'a' : 'b', ?", new Object[] {null, 3, 4}));
+                        "select 1 ? 'a' : 'b', ?", new Object[] {null, 3}));
     }
 
     // ---- backslash-escaped quote inside a literal ----------------------------
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): the scanner only recognises the
-     * doubled-quote ({@code ''}) escape, so a backslash-escaped quote ({@code \'} —
-     * ClickHouse's default escaping style, and what {@link ChPreparedStatement#quote}
-     * itself emits) is taken as the end of the literal. The scanner then counts the
-     * {@code ?} still inside the literal and misses the real one after it.
+     * KNOWN BUG (fails until fixed): the scanner only recognises the doubled-quote
+     * ({@code ''}) escape, so a backslash-escaped quote ({@code \'} — ClickHouse's
+     * default escaping style, and what {@link ChPreparedStatement#quote} itself emits,
+     * meaning substitution output corrupts if it is ever re-scanned) is taken as the
+     * end of the literal.
+     *
+     * <p>Expected: {@code \'} stays inside the literal, so the only parameter is the
+     * real trailing {@code ?} and substitution yields
+     * {@code "SELECT 'it\'s ?' , 42"}. Actual: the literal is closed at the
+     * backslash-escaped quote, the {@code ?} inside the literal is substituted
+     * instead, producing {@code "SELECT 'it\'s 42' , ?"}.
+     *
+     * <p>Fix: in the shared scan loop of {@link ChPreparedStatement#countPlaceholders}
+     * / {@code substitute} / {@code rewriteToNamedParams} (ChPreparedStatement.java),
+     * while {@code inString}, treat a {@code '\\'} as consuming the following
+     * character so {@code \'} (and {@code \\}) never toggles the literal state.
      */
     @Test
     void knownBug_backslashEscapedQuoteEndsLiteralEarly() throws SQLException {
-        // One '?' is found, but it is the one INSIDE the literal, not the real trailing one.
+        // Exactly one real parameter either way (the buggy scanner also reports 1,
+        // but it is the '?' INSIDE the literal; the substitution below exposes that).
         assertEquals(1, ChPreparedStatement.countPlaceholders("SELECT 'it\\'s ?' , ?"));
-        // Should be "SELECT 'it\'s ?' , 42".
-        assertEquals("SELECT 'it\\'s 42' , ?",
+        assertEquals("SELECT 'it\\'s ?' , 42",
                 ChPreparedStatement.substitute("SELECT 'it\\'s ?' , ?", new Object[] {null, 42}));
     }
 
@@ -318,11 +342,20 @@ class ChSqlParsingTest {
     }
 
     /**
-     * KNOWN BUG — pinned, not fixed (out of scope): {@code indexOfValues} matches the
-     * six letters {@code VALUES} anywhere outside a string literal, without a word
-     * boundary, so a table (or column) name beginning with "values" is split as if it
-     * were the VALUES keyword and the collapsed multi-row INSERT is corrupted. The
-     * reference parsers tokenize and would find the real keyword.
+     * KNOWN BUG (fails until fixed): {@code indexOfValues} matches the six letters
+     * {@code VALUES} anywhere outside a string literal, without a word boundary, so a
+     * table (or column) name beginning with "values" is split as if it were the
+     * VALUES keyword.
+     *
+     * <p>Expected (the reference parsers tokenize and find the real keyword): the
+     * batch collapses to {@code "INSERT INTO values_t (a) VALUES (1),(2)"}. Actual:
+     * the template is split at {@code values_t}, producing the corrupted
+     * {@code "INSERT INTO values _t (a) VALUES (1),_t (a) VALUES (2)"}.
+     *
+     * <p>Fix: in {@code ChPreparedStatement.indexOfValues}
+     * (ChPreparedStatement.java), only accept a match when the characters immediately
+     * before and after the six-letter region are absent or non-identifier characters
+     * (not letter/digit/underscore/backtick/quote) — i.e. a word-boundary check.
      */
     @Test
     void knownBug_batchCollapseSplitsOnValuesPrefixedTableName() throws SQLException {
@@ -335,8 +368,6 @@ class ChSqlParsingTest {
         ps.addBatch();
         ps.executeBatch();
 
-        // Should be "INSERT INTO values_t (a) VALUES (1),(2)".
-        assertEquals("INSERT INTO values _t (a) VALUES (1),_t (a) VALUES (2)",
-                core.executed.get(0));
+        assertEquals("INSERT INTO values_t (a) VALUES (1),(2)", core.executed.get(0));
     }
 }
