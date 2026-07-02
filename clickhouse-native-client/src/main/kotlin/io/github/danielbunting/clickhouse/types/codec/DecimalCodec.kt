@@ -79,6 +79,14 @@ public class DecimalCodec(precision: Int, scale: Int) : ColumnCodec<Any> {
         return if (useLong) LongArray(rowCount) else arrayOfNulls<Any>(rowCount)
     }
 
+    /**
+     * The boxed backing array of a BigInteger-backed decimal column. Safe by
+     * construction: the only arrays that reach the non-long paths are the
+     * `arrayOfNulls<Any>` ones [allocate] created.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun boxedArray(array: Any): Array<Any?> = array as Array<Any?>
+
     @Throws(IOException::class)
     override fun read(input: BinaryReader, rowCount: Int, dest: Any) {
         if (useLong) {
@@ -87,7 +95,7 @@ public class DecimalCodec(precision: Int, scale: Int) : ColumnCodec<Any> {
                 arr[i] = readLongValue(input)
             }
         } else {
-            val arr = dest as Array<Any?>
+            val arr = boxedArray(dest)
             for (i in 0 until rowCount) {
                 arr[i] = readBigIntegerValue(input)
             }
@@ -102,7 +110,7 @@ public class DecimalCodec(precision: Int, scale: Int) : ColumnCodec<Any> {
                 writeLongValue(out, arr[i])
             }
         } else {
-            val arr = src as Array<Any?>
+            val arr = boxedArray(src)
             for (i in 0 until rowCount) {
                 val v = arr[i]
                 val value = if (v != null) v as BigInteger else BigInteger.ZERO
@@ -116,7 +124,7 @@ public class DecimalCodec(precision: Int, scale: Int) : ColumnCodec<Any> {
             val raw = (array as LongArray)[row]
             return BigDecimal.valueOf(raw, scale)
         } else {
-            var raw = (array as Array<Any?>)[row] as BigInteger?
+            var raw = boxedArray(array)[row] as BigInteger?
             if (raw == null) raw = BigInteger.ZERO
             return BigDecimal(raw, scale)
         }
@@ -147,7 +155,7 @@ public class DecimalCodec(precision: Int, scale: Int) : ColumnCodec<Any> {
         if (useLong) {
             (array as LongArray)[row] = unscaled.longValueExact()
         } else {
-            (array as Array<Any?>)[row] = unscaled
+            boxedArray(array)[row] = unscaled
         }
     }
 

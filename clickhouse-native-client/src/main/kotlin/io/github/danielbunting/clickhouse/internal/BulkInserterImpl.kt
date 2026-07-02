@@ -317,9 +317,9 @@ internal constructor(
 
     override fun addRange(rows: Iterable<T>) {
         ensureInitialized()
-        if (rows == null) {
-            throw IllegalArgumentException("rows must not be null")
-        }
+        // No manual null check: the parameter is non-null in the BulkInserter contract,
+        // and Kotlin's compiler-generated parameter guard already rejects a null from
+        // Java callers before the body runs.
         for (row in rows) {
             add(row)
         }
