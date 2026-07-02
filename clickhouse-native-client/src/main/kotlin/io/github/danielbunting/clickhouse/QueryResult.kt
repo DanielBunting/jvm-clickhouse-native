@@ -19,5 +19,15 @@ public interface QueryResult : AutoCloseable {
     /** Lazy, forward-only iterator over result blocks. */
     public fun blocks(): Iterator<Block>
 
+    /**
+     * Aggregated server-side execution feedback (read rows/bytes, written rows,
+     * `rows_before_limit`), assembled from the Progress/ProfileInfo packets interleaved
+     * with the stream. A running snapshot until the result is fully consumed or closed;
+     * implementations without wire feedback return [QuerySummary.EMPTY].
+     */
+    public fun summary(): io.github.danielbunting.clickhouse.QuerySummary {
+        return io.github.danielbunting.clickhouse.QuerySummary.EMPTY
+    }
+
     override fun close()
 }

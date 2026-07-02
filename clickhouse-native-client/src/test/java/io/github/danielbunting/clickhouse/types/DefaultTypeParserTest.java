@@ -207,6 +207,22 @@ class DefaultTypeParserTest {
         assertEquals("UInt32", DefaultTypeParser.unwrapNullable("UInt32"));
     }
 
+    /**
+     * A Tuple element whose leading token is NOT a plain identifier — here a
+     * backtick-quoted name containing a space — is not split into a field name: the
+     * whole element is treated as the type, so it fails fast as an unsupported type
+     * carrying the FULL element text (proving no mis-split), rather than silently
+     * parsing {@code String} under a half-parsed name. Backticked tuple field names
+     * are the supported-type boundary today; move this test when support lands.
+     */
+    @Test
+    void tupleElementWithNonIdentifierLeadingTokenIsNotSplitIntoFieldName() {
+        UnsupportedTypeException ex = assertThrows(UnsupportedTypeException.class,
+                () -> parser.parse("Tuple(`a b` UInt32)"));
+        assertTrue(ex.getMessage().contains("`a b` UInt32"),
+                "the whole element must be reported as the type, was: " + ex.getMessage());
+    }
+
     @Test
     void unsupportedTypeThrows() {
         assertThrows(ClickHouseException.class, () -> parser.parse("Bogus"));
@@ -247,5 +263,25 @@ class DefaultTypeParserTest {
         // Malformed (bad syntax) stays a plain ClickHouseException, not UnsupportedTypeException.
         assertFalse(assertThrows(ClickHouseException.class, () -> parser.parse(""))
                 instanceof UnsupportedTypeException);
+    }
+
+    /**
+     * Parameterized {@code JSON(...)} declarations (reference: ClickHouseColumnTest
+     * #testJSONBinaryFormat — typed paths, {@code max_dynamic_paths}, {@code SKIP} /
+     * {@code SKIP REGEXP} pruning) all resolve to the JSON codec: the parser treats the
+     * parameter list as opaque because the FLATTENED wire shape is self-describing.
+     */
+    @Test
+    void parameterizedJsonDeclarationsResolveToJsonCodec() {
+        for (String type : new String[] {
+                "JSON(max_dynamic_paths=8)",
+                "JSON(a.b Int64)",
+                "JSON(max_dynamic_paths=8, a.b String, SKIP a.e)",
+                "JSON(a.b DateTime64(3), SKIP REGEXP 'tmp.*')",
+                "JSON(max_dynamic_types=4, max_dynamic_paths=100)",
+        }) {
+            assertInstanceOf(io.github.danielbunting.clickhouse.types.codec.JsonColumnCodec.class,
+                    parser.parse(type), type);
+        }
     }
 }

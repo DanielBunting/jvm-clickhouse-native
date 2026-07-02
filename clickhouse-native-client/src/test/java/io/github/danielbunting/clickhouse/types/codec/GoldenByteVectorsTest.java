@@ -549,6 +549,30 @@ class GoldenByteVectorsTest {
         assertEquals(List.of(7, "x"), codec.get(dest, 0));
     }
 
+    @Test
+    void array_nullableNothing_oneDummyBytePerElement() throws IOException {
+        // Array(Nullable(Nothing)) [[NULL]] — the server's own type for a NULL-only
+        // array literal (SELECT [NULL]). SerializationNothing is ONE dummy (zero) byte
+        // per value (serializeBinaryBulk writes n zero bytes, deserializeBinaryBulk
+        // skips n) — verified against a live 26.5 server via the Dynamic encode
+        // round-trip in DynamicTypesIT. Zero bytes here desyncs the whole stream.
+        //   offsets  = 1 x UInt64 cumulative end-offset [1]
+        //   null map = 1 byte 01 (element is NULL)
+        //   values   = 1 dummy Nothing byte 00
+        ArrayColumnCodec codec =
+                new ArrayColumnCodec(new NullableColumnCodec(new NothingCodec()));
+        Object[] src = codec.allocate(1);
+        src[0] = java.util.Collections.singletonList(null);
+        String golden = "0100000000000000" // offset 1
+                + "01"                      // null map: [true]
+                + "00";                     // Nothing: one dummy byte
+        assertHex(golden, encode(codec, src, 1));
+
+        Object[] dest = codec.allocate(1);
+        codec.read(Bytes.reader(hex(golden)), 1, dest);
+        assertEquals(java.util.Collections.singletonList(null), dest[0]);
+    }
+
     // --- Types where a stable golden vector is IMPRACTICAL (documented, not forced) ---
     //
     // Nullable(T): the null-map is a block-layer concern, not part of the codec —

@@ -299,4 +299,33 @@ final class DefaultBinaryReaderWriterTest {
         assertEquals(-77, r.readVarInt());
         assertEquals(-1L, r.readUInt64());
     }
+
+    /**
+     * Bulk reads larger than the reader's internal 64 KiB scratch chunk must span the
+     * chunk boundary without losing or reordering values (reference:
+     * InputStreamImplTest#testReadPartsFromInputStream — reads spanning internal buffers).
+     * 64 KiB holds 8,192 longs / 16,384 ints, so 20,000 values forces at least two chunks.
+     */
+    @Test
+    void bulkReadInto_spansScratchChunkBoundary() throws IOException {
+        int n = 20_000;
+        long[] longs = new long[n];
+        int[] ints = new int[n];
+        for (int i = 0; i < n; i++) {
+            longs[i] = 0x0102030405060708L * i + i;
+            ints[i] = 0x01020304 * i + i;
+        }
+        byte[] bytes = write(w -> {
+            w.writeFrom(longs, n);
+            w.writeFrom(ints, n);
+        });
+
+        DefaultBinaryReader r = reader(bytes);
+        long[] gotLongs = new long[n];
+        r.readInto(gotLongs, n);
+        assertArrayEquals(longs, gotLongs, "long run crossing the 8,192-value chunk boundary");
+        int[] gotInts = new int[n];
+        r.readInto(gotInts, n);
+        assertArrayEquals(ints, gotInts, "int run crossing the 16,384-value chunk boundary");
+    }
 }

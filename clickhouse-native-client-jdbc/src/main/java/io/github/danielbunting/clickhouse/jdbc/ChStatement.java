@@ -39,6 +39,7 @@ public class ChStatement implements Statement {
     private int queryTimeoutSeconds;
     private boolean escapeProcessing = true;
     private boolean closed;
+    private boolean closeOnCompletion;
 
     /**
      * Creates a statement bound to the given JDBC connection.
@@ -50,10 +51,13 @@ public class ChStatement implements Statement {
     }
 
     /**
-     * Returns {@code true} when the (trimmed) SQL is a result-producing statement —
-     * one beginning with {@code SELECT}, {@code SHOW}, {@code DESC}/{@code DESCRIBE},
-     * {@code EXISTS}, or a {@code WITH} CTE. Used by {@link #execute(String)} to
-     * decide between {@link #executeQuery(String)} and {@link #executeUpdate(String)}.
+     * Returns {@code true} when the SQL is a result-producing statement — one whose
+     * first keyword (after leading whitespace, {@code --}/{@code #}/{@code #!} line
+     * comments, nesting {@code /* *}{@code /} block comments, and opening parentheses)
+     * is {@code SELECT}, {@code SHOW}, {@code DESC}/{@code DESCRIBE}, {@code EXISTS},
+     * {@code EXPLAIN}, {@code CHECK}, or a {@code WITH} CTE. Used by
+     * {@link #execute(String)} to decide between {@link #executeQuery(String)} and
+     * {@link #executeUpdate(String)}.
      *
      * @param sql the SQL to classify (may be {@code null})
      * @return whether the statement yields a {@link ResultSet}
@@ -62,23 +66,82 @@ public class ChStatement implements Statement {
         if (sql == null) {
             return false;
         }
-        String trimmed = sql.stripLeading();
-        // Skip a leading line comment / block comment is out of scope for v1.
-        String upper = trimmed.toUpperCase();
+        int i = skipLeadingNoise(sql);
+        if (i < 0 || i >= sql.length()) {
+            return false;
+        }
+        String upper = sql.substring(i, Math.min(sql.length(), i + 8)).toUpperCase();
         return upper.startsWith("SELECT")
                 || upper.startsWith("SHOW")
                 || upper.startsWith("DESC")
                 || upper.startsWith("EXISTS")
+                || upper.startsWith("EXPLAIN")
+                || upper.startsWith("CHECK")
                 || upper.startsWith("WITH");
     }
 
     /**
-     * Wraps a core failure as a {@link SQLException} preserving the cause.
+     * Returns the index of the first character of real SQL text, skipping leading
+     * whitespace, line comments ({@code --}, {@code #}, {@code #!}), nesting block
+     * comments, and opening parentheses (so a parenthesized {@code (SELECT …)}
+     * classifies by its inner keyword). Returns {@code -1} when an unterminated
+     * block comment swallows the rest of the text.
+     */
+    private static int skipLeadingNoise(String sql) {
+        int n = sql.length();
+        int i = 0;
+        while (i < n) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c) || c == '(') {
+                i++;
+            } else if (c == '#' || (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-')) {
+                int nl = sql.indexOf('\n', i);
+                if (nl < 0) {
+                    return n;
+                }
+                i = nl + 1;
+            } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
+                // ClickHouse block comments nest.
+                int depth = 1;
+                i += 2;
+                while (i < n && depth > 0) {
+                    if (sql.charAt(i) == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
+                        depth++;
+                        i += 2;
+                    } else if (sql.charAt(i) == '*' && i + 1 < n && sql.charAt(i + 1) == '/') {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                }
+                if (depth > 0) {
+                    return -1;
+                }
+            } else {
+                break;
+            }
+        }
+        return i;
+    }
+
+    /**
+     * Wraps a core failure as a {@link SQLException} preserving the cause. A
+     * {@link io.github.danielbunting.clickhouse.ServerException} propagates its
+     * server error code through {@link SQLException#getErrorCode()}; the server-side
+     * abort of a {@link #setQueryTimeout} deadline (TIMEOUT_EXCEEDED, code 159)
+     * surfaces as an {@link java.sql.SQLTimeoutException}.
      *
      * @param e the core exception
      * @return a {@link SQLException} to throw
      */
     protected static SQLException wrap(RuntimeException e) {
+        if (e instanceof io.github.danielbunting.clickhouse.ServerException se) {
+            if (se.code() == 159) {
+                return new java.sql.SQLTimeoutException(se.getMessage(), null, se.code(), se);
+            }
+            return new SQLException(se.getMessage(), null, se.code(), se);
+        }
         return new SQLException(e.getMessage(), e);
     }
 
@@ -88,24 +151,76 @@ public class ChStatement implements Statement {
         }
     }
 
+    /**
+     * Per-query server settings derived from statement state: a positive
+     * {@link #setQueryTimeout} travels as {@code max_execution_time}, so the SERVER
+     * aborts the query (TIMEOUT_EXCEEDED, code 159) — surfaced as an
+     * {@link java.sql.SQLTimeoutException} by {@code wrap}.
+     *
+     * @return the settings map, or {@code null} when no statement setting applies
+     */
+    protected java.util.Map<String, String> perQuerySettings() {
+        if (queryTimeoutSeconds > 0) {
+            return java.util.Map.of("max_execution_time", String.valueOf(queryTimeoutSeconds));
+        }
+        return null;
+    }
+
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
+        return executeQueryInternal(sql);
+    }
+
+    /**
+     * The real query path. Kept separate from {@link #executeQuery(String)} so
+     * {@link ChPreparedStatement} can reject the public String-arg overloads (per the
+     * JDBC PreparedStatement contract) while still routing its own substituted SQL here.
+     */
+    ResultSet executeQueryInternal(String sql) throws SQLException {
         checkOpen();
+        closeSupersededResultSet();
         try {
             currentUpdateCount = -1;
-            currentResultSet = new ChResultSet(conn.core().query(sql));
+            java.util.Map<String, String> settings = perQuerySettings();
+            currentResultSet = new ChResultSet(settings == null
+                    ? conn.core().query(sql)
+                    : conn.core().query(sql, settings), this);
             return currentResultSet;
         } catch (ClickHouseException e) {
             throw wrap(e);
         }
     }
 
+    /**
+     * Implicitly closes the previous result set before a new execution, per the JDBC
+     * contract that re-executing a statement releases its prior dependent result. The
+     * field is detached BEFORE closing so {@link #resultSetClosed} sees a non-current
+     * result set and {@code closeOnCompletion} cannot fire mid-execute.
+     */
+    protected void closeSupersededResultSet() {
+        ChResultSet old = currentResultSet;
+        if (old != null) {
+            currentResultSet = null;
+            old.close();
+        }
+    }
+
     @Override
     public int executeUpdate(String sql) throws SQLException {
+        return executeUpdateInternal(sql);
+    }
+
+    /** The real update path; see {@link #executeQueryInternal(String)} for why it exists. */
+    int executeUpdateInternal(String sql) throws SQLException {
         checkOpen();
+        closeSupersededResultSet();
         try {
-            conn.core().execute(sql);
-            currentResultSet = null;
+            java.util.Map<String, String> settings = perQuerySettings();
+            if (settings == null) {
+                conn.core().execute(sql);
+            } else {
+                conn.core().execute(sql, settings);
+            }
             currentUpdateCount = 0;
             return 0;
         } catch (ClickHouseException e) {
@@ -115,12 +230,17 @@ public class ChStatement implements Statement {
 
     @Override
     public boolean execute(String sql) throws SQLException {
+        return executeInternal(sql);
+    }
+
+    /** The real execute path; see {@link #executeQueryInternal(String)} for why it exists. */
+    boolean executeInternal(String sql) throws SQLException {
         checkOpen();
         if (producesResultSet(sql)) {
-            executeQuery(sql);
+            executeQueryInternal(sql);
             return true;
         }
-        executeUpdate(sql);
+        executeUpdateInternal(sql);
         return false;
     }
 
@@ -169,13 +289,17 @@ public class ChStatement implements Statement {
     public int[] executeBatch() throws SQLException {
         checkOpen();
         int[] results = new int[batch.size()];
+        int completed = 0;
         try {
-            for (int i = 0; i < batch.size(); i++) {
-                conn.core().execute(batch.get(i));
-                results[i] = SUCCESS_NO_INFO;
+            for (String sql : batch) {
+                conn.core().execute(sql);
+                results[completed++] = SUCCESS_NO_INFO;
             }
         } catch (ClickHouseException e) {
-            throw wrap(e);
+            // JDBC contract: a failed batch throws BatchUpdateException carrying the
+            // update counts of the entries that executed before the failure.
+            throw new java.sql.BatchUpdateException(e.getMessage(), null, 0,
+                    java.util.Arrays.copyOf(results, completed), e);
         } finally {
             batch.clear();
         }
@@ -314,7 +438,10 @@ public class ChStatement implements Statement {
     @Override
     public void setMaxFieldSize(int max) throws SQLException {
         checkOpen();
-        // Unbounded; ignore.
+        if (max < 0) {
+            throw new SQLException("maxFieldSize must be >= 0");
+        }
+        // Positive values are accepted and ignored: this driver never truncates.
     }
 
     @Override
@@ -331,12 +458,30 @@ public class ChStatement implements Statement {
     @Override
     public void closeOnCompletion() throws SQLException {
         checkOpen();
+        this.closeOnCompletion = true;
     }
 
     @Override
     public boolean isCloseOnCompletion() throws SQLException {
         checkOpen();
-        return false;
+        return closeOnCompletion;
+    }
+
+    /**
+     * Callback from {@link ChResultSet#close()}: when {@link #closeOnCompletion()} was
+     * requested, the statement closes together with its dependent result set. The
+     * result set is already closed at this point, so only the statement state flips.
+     * Only the CURRENT result set is a dependent one — a superseded (already detached)
+     * result set closing must not affect the statement.
+     */
+    void resultSetClosed(ChResultSet rs) {
+        if (rs != currentResultSet) {
+            return;
+        }
+        if (closeOnCompletion && !closed) {
+            closed = true;
+            currentResultSet = null;
+        }
     }
 
     // ---- generated keys / explicit autogen overloads: unsupported ----------

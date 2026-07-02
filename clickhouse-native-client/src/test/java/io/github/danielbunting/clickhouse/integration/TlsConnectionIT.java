@@ -136,4 +136,45 @@ class TlsConnectionIT {
                     "a TLS connection trusting the server cert should run a query end-to-end");
         }
     }
+
+    /**
+     * Block compression stacked on the TLS transport (reference: client-v2
+     * InsertTests#testInsertAndReadBackWithSecureConnection with compression): a bulk
+     * insert and read-back over the secure channel with LZ4 and ZSTD frames inside the
+     * TLS stream.
+     */
+    @Test
+    void insertAndReadBackOverTlsWithCompression() {
+        record Row(long id, String s) {}
+        for (io.github.danielbunting.clickhouse.compress.CompressionMethod method :
+                new io.github.danielbunting.clickhouse.compress.CompressionMethod[] {
+                        io.github.danielbunting.clickhouse.compress.CompressionMethod.LZ4,
+                        io.github.danielbunting.clickhouse.compress.CompressionMethod.ZSTD}) {
+            ClickHouseConfig cfg = baseTls()
+                    .insecureSkipVerify(true)
+                    .compression(method)
+                    .build();
+            String table = "tls_comp_" + method.name().toLowerCase(java.util.Locale.ROOT)
+                    + "_" + System.nanoTime();
+            try (ClickHouseConnection conn = ClickHouseConnection.open(cfg)) {
+                try {
+                    conn.execute("CREATE TABLE " + table
+                            + " (id UInt32, s String) ENGINE = MergeTree ORDER BY id");
+                    try (var inserter = conn.createBulkInserter(table, Row.class)) {
+                        inserter.init();
+                        inserter.addRange(java.util.List.of(
+                                new Row(1, "alpha"), new Row(2, "beta")));
+                        inserter.complete();
+                    }
+                    assertEquals(2L, conn.executeScalar("SELECT count() FROM " + table),
+                            "bulk insert over TLS+" + method + " landed");
+                    assertEquals(1L, conn.executeScalar(
+                                    "SELECT count() FROM " + table + " WHERE s = 'alpha'"),
+                            "data readable back over TLS+" + method);
+                } finally {
+                    conn.execute("DROP TABLE IF EXISTS " + table);
+                }
+            }
+        }
+    }
 }

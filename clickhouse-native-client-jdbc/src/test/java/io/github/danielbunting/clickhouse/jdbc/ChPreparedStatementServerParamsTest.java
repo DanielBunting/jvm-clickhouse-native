@@ -111,7 +111,7 @@ class ChPreparedStatementServerParamsTest {
     private static ChConnection serverParamConn(RecordingCore core) {
         Properties info = new Properties();
         info.setProperty("server_side_params", "true");
-        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info);
+        return new ChConnection(core, "jdbc:chnative://localhost:9000/default", info, "default");
     }
 
     // ---- rewrite helper -----------------------------------------------------
@@ -128,6 +128,19 @@ class ChPreparedStatementServerParamsTest {
         assertEquals(
                 "SELECT {_p1:String} WHERE s = 'is it?'",
                 ChPreparedStatement.rewriteToNamedParams("SELECT ? WHERE s = 'is it?'"));
+    }
+
+    /**
+     * The bindings-aware rewrite declares a parameter beyond the end of the values
+     * array (i.e. never bound) {@code Nullable(String)}, exactly like an explicit
+     * null, so the server accepts the {@code \N} sentinel for it.
+     */
+    @Test
+    void rewriteDeclaresParamsBeyondValuesArrayNullable() {
+        assertEquals(
+                "SELECT {_p1:String}, {_p2:Nullable(String)}",
+                ChPreparedStatement.rewriteToNamedParams(
+                        "SELECT ?, ?", new Object[] {null, 1}));
     }
 
     // ---- end-to-end through the statement -----------------------------------

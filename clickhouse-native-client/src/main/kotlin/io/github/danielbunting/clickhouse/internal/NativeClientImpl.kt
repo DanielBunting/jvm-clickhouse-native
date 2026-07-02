@@ -365,7 +365,52 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
      * @return the effective, insertion-ordered settings map (never null, never empty)
      */
     private fun effectiveSettings(overrides: Map<String, String>?): Map<String, String> {
-        return mergeSettings(config.settings(), overrides)
+        val merged = mergeSettings(config.settings(), overrides) as LinkedHashMap<String, String>
+        // Server-side enforcement of the configured queryTimeout: travel as
+        // max_execution_time unless the caller (or connection settings) already set it.
+        val timeout = config.queryTimeout()
+        if (timeout != null && !timeout.isZero && !timeout.isNegative
+            && !merged.containsKey("max_execution_time")
+        ) {
+            // Round UP to whole seconds — max_execution_time is integral seconds and a
+            // sub-second timeout must not become "no timeout".
+            val seconds = (timeout.toMillis() + 999) / 1000
+            merged["max_execution_time"] = seconds.toString()
+        }
+        return merged
+    }
+
+    override fun ping(): Boolean {
+        if (closed || poisoned) {
+            return false
+        }
+        try {
+            synchronized(writeLock) {
+                writer.writeVarUInt(ClientPacket.PING.code.toLong())
+                writer.flush()
+            }
+            // The server may interleave Progress packets before the Pong; skip them.
+            while (true) {
+                val msg = readMessage()
+                when (msg.type()) {
+                    ServerPacket.PONG -> return true
+                    ServerPacket.PROGRESS, ServerPacket.LOG, ServerPacket.PROFILE_EVENTS -> {
+                        // keep draining
+                    }
+                    else -> {
+                        // A packet outside the ping protocol was consumed and the real
+                        // Pong may still be in flight: the wire position is unknown.
+                        poisoned = true
+                        return false
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // readMessage poisons its own I/O failures; write-half and decode
+            // failures land here with the request/response state indeterminate.
+            poisoned = true
+            return false
+        }
     }
 
     override fun sendData(block: Block) {
@@ -431,28 +476,48 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
      */
     @Throws(IOException::class)
     private fun sendBlock(block: Block) {
+        val revision = effectiveRevision()
+
+        // Serialize the block into the reusable staging buffer BEFORE touching the socket
+        // writer: a codec failure during serialization (e.g. a value the column codec
+        // rejects) must leave the wire byte-clean — no stray Data packet header — so the
+        // connection stays healthy and reusable. For the compressed path this is a pure
+        // reorder of the previous code (the block was always staged for compression); the
+        // uncompressed path gains one in-memory copy, negligible next to the socket write.
+        // Reuse one staging buffer + writer + compressor per connection across blocks.
+        // Safe because the single-operation guard means only one block is ever being
+        // written at a time on this connection; these are instance fields, never shared
+        // across connections.
+        var staging = compressStaging
+        if (staging == null) {
+            staging = ResettableByteArrayOutputStream(COMPRESS_STAGING_INITIAL_CAPACITY)
+            compressStaging = staging
+            compressStagingWriter = DefaultBinaryWriter(staging)
+        }
+        staging.reset()
+        val stagingWriter = compressStagingWriter!!
+        try {
+            BlockCodec.write(stagingWriter, block, revision)
+            stagingWriter.flush()
+        } catch (t: Throwable) {
+            // The staging WRITER buffers internally, so a failed serialization can leave
+            // partial bytes in its buffer that would corrupt the next block. Discard the
+            // staging pair; the next sendBlock rebuilds it fresh. The socket writer was
+            // never touched, so the wire stays byte-clean.
+            compressStaging = null
+            compressStagingWriter = null
+            throw t
+        }
+
+        // The block is fully serialized; only now emit wire bytes.
         writer.writeVarUInt(ClientPacket.DATA.code.toLong())
         // Table name — empty for ordinary inserts / query data. NOT compressed.
         // VERIFY against CH.Native: temporary-table name precedes the block, default "".
         writer.writeString("")
-
-        val revision = effectiveRevision()
         if (compressionEnabled) {
-            // Reuse one staging buffer + writer + compressor per connection across
-            // blocks. Safe because the single-operation guard means only one block is
-            // ever being written at a time on this connection; these are instance
-            // fields, never shared across connections.
-            var staging = compressStaging
-            if (staging == null) {
-                staging = ResettableByteArrayOutputStream(COMPRESS_STAGING_INITIAL_CAPACITY)
-                compressStaging = staging
-                compressStagingWriter = DefaultBinaryWriter(staging)
+            if (compressor == null) {
                 compressor = Compressors.compressor(config.compression())
             }
-            staging.reset()
-            val stagingWriter = compressStagingWriter!!
-            BlockCodec.write(stagingWriter, block, revision)
-            stagingWriter.flush()
             // Compress directly from the staging buffer's backing array + length —
             // no toByteArray() copy.
             CompressedBlockCodec.write(
@@ -460,7 +525,7 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
                 staging.buffer(), 0, staging.length(), compressor!!
             )
         } else {
-            BlockCodec.write(writer, block, revision)
+            writer.writeBytes(staging.buffer(), 0, staging.length())
         }
         writer.flush()
     }
@@ -735,14 +800,17 @@ public constructor(config: ClickHouseConfig?, endpoint: Endpoint?) : NativeClien
         }
 
         /**
-         * Renders a query-parameter wire value as a ClickHouse Field dump: the `\N` NULL
-         * sentinel becomes the bare token `NULL`; any other value becomes a single-quoted
-         * String-Field literal with `\\` and `'` escaped (FieldVisitorDump form).
+         * Renders a query-parameter wire value as a ClickHouse Field dump: a
+         * single-quoted String-Field literal with `\\` and `'` escaped
+         * (FieldVisitorDump form). The `\N` NULL sentinel is dumped like any other
+         * string (`'\\N'`) — exactly what clickhouse-client sends for
+         * `--param_x='\N'` — because the server's parameter substitution parses the
+         * restored STRING per the placeholder type, where `\N` means NULL for a
+         * `Nullable(T)`. A bare `NULL` Field token is rejected in contexts that parse
+         * the value as quoted text (e.g. `INSERT ... VALUES`), with
+         * "Cannot parse quoted string" (verified on a live 25.8 server).
          */
         private fun dumpFieldValue(value: String?): String {
-            if ("\\N" == value) {
-                return "NULL"
-            }
             return "'" + value!!.replace("\\", "\\\\").replace("'", "\\'") + "'"
         }
 

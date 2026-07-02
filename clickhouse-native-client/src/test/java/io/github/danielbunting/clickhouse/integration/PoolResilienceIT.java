@@ -96,11 +96,12 @@ class PoolResilienceIT extends IntegrationTestBase {
     }
 
     // ---------------------------------------------------------------------------------------
-    // A bulk INSERT that fails mid-stream leaves the connection mid-INSERT (dirty). It must be
-    // poisoned and not recycled — the recurring "dirty connection" hazard.
+    // A bulk INSERT that fails client-side aborts CLEANLY: the rejection fires before any
+    // block bytes exist and the inserter's close() ends the INSERT gracefully, so the same
+    // pooled connection stays healthy and is recycled — no invalidate-and-replace cycle.
     // ---------------------------------------------------------------------------------------
     @Test
-    void failedBulkInsertPoisonsAndPoolRecovers() {
+    void failedBulkInsertStaysCleanAndPoolRecycles() {
         String table = "pool_bulkfail_" + System.nanoTime();
         try (ClickHouseConnection admin = ClickHouseConnection.open(config())) {
             admin.execute("CREATE TABLE " + table
@@ -116,10 +117,11 @@ class PoolResilienceIT extends IntegrationTestBase {
                             ins.complete();
                         }
                     });
-                    assertTrue(conn.isPoisoned(),
-                            "a bulk INSERT abandoned mid-stream must poison the connection");
+                    assertFalse(conn.isPoisoned(),
+                            "a client-side insert rejection aborts cleanly and must NOT poison "
+                                    + "the pooled connection");
                 }
-                // Replacement is clean and usable.
+                // The SAME connection is recycled, clean and usable.
                 try (ClickHouseConnection conn = pool.borrow()) {
                     assertEquals(0L, conn.executeScalar("SELECT count() FROM " + table),
                             "pool recovered; the failed insert committed nothing");

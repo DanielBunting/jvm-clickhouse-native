@@ -42,6 +42,12 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
     private boolean serverVersionFetched;
 
     /**
+     * Memoized result of {@code SELECT currentUser()}. Only ever holds server truth;
+     * the busy-connection fallback in {@link #getUserName()} is deliberately not cached.
+     */
+    private String cachedUserName;
+
+    /**
      * Creates metadata for the given JDBC connection.
      *
      * @param conn the owning {@link ChConnection}; must not be {@code null}
@@ -182,7 +188,36 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
 
     @Override
     public String getUserName() throws SQLException {
-        return conn.getClientInfo("user");
+        // Ask the server: currentUser() reports whoever the session authenticated as,
+        // regardless of how the credentials were supplied (URL, Properties, DataSource).
+        // The answer cannot change for the life of the connection, so it is memoized.
+        if (cachedUserName != null) {
+            return cachedUserName;
+        }
+        try (java.sql.Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT currentUser()")) {
+            cachedUserName = rs.next() ? rs.getString(1) : null;
+            return cachedUserName;
+        } catch (SQLException e) {
+            if (causedByConcurrentUse(e)) {
+                // The shared single-operation core connection is busy streaming another
+                // result, so the probe query cannot run. Fall back to the locally
+                // configured user WITHOUT caching it, so a later idle call still gets
+                // the server's answer.
+                return conn.configuredUser();
+            }
+            throw e;
+        }
+    }
+
+    /** Whether the failure is the {@code ConnectionGuard} rejecting a concurrent operation. */
+    private static boolean causedByConcurrentUse(SQLException e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof io.github.danielbunting.clickhouse.ConcurrentConnectionUseException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -1091,7 +1126,7 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
                 + base + " = 'Int8', " + Types.TINYINT + ", "
                 + base + " = 'Int32', " + Types.INTEGER + ", "
                 + base + " IN ('UInt32','Int64','UInt64'), " + Types.BIGINT + ", "
-                + base + " IN ('Int128','UInt128','Int256','UInt256'), " + Types.DECIMAL + ", "
+                + base + " IN ('Int128','UInt128','Int256','UInt256'), " + Types.NUMERIC + ", "
                 + base + " = 'Float32', " + Types.REAL + ", "
                 + base + " = 'Float64', " + Types.DOUBLE + ", "
                 + base + " = 'String', " + Types.VARCHAR + ", "
@@ -1236,6 +1271,10 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
             {"Enum16", Types.VARCHAR, 0, 0, 0},
             {"Array", Types.ARRAY, 0, 0, 0},
         };
+        // The union chain is wrapped in a subselect below: in ClickHouse an ORDER BY
+        // after a UNION ALL binds only to the last SELECT, so a bare ORDER BY would
+        // leave the overall row order nondeterministic.
+        sql.append("SELECT * FROM (");
         for (int i = 0; i < rows.length; i++) {
             Object[] r = rows[i];
             String name = (String) r[0];
@@ -1268,7 +1307,7 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
                .append("CAST(NULL AS Nullable(Int32)) AS SQL_DATETIME_SUB, ")
                .append("toInt32(").append(radix).append(") AS NUM_PREC_RADIX");
         }
-        sql.append(" ORDER BY DATA_TYPE");
+        sql.append(") ORDER BY DATA_TYPE");
         return runMeta(sql.toString());
     }
 

@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class ChParameterMetaDataTest {
 
     private static ChPreparedStatement ps(String sql) {
-        ChConnection c = new ChConnection(new FakeCore(), "jdbc:chnative://localhost:9000/default", new Properties());
+        ChConnection c = new ChConnection(new FakeCore(), "jdbc:chnative://localhost:9000/default", new Properties(), "default");
         return new ChPreparedStatement(c, sql);
     }
 
@@ -54,6 +54,30 @@ class ChParameterMetaDataTest {
         assertEquals("String", md.getParameterTypeName(1));
         assertEquals(Object.class.getName(), md.getParameterClassName(1));
         assertEquals(ParameterMetaData.parameterModeIn, md.getParameterMode(1));
+    }
+
+    /**
+     * Every per-parameter accessor throws {@link SQLException} for parameter index 0
+     * and for indexes beyond {@code getParameterCount()}, per the JDBC contract (was
+     * knownBug 28; reference: jdbc-v2 ParameterMetaDataImplTest).
+     */
+    @Test
+    void indexRangeIsValidated() throws SQLException {
+        ParameterMetaData md = ps("SELECT ?").getParameterMetaData();
+        assertEquals(1, md.getParameterCount());
+        for (int idx : new int[] {0, 2, 99}) {
+            String at = "index " + idx;
+            assertThrows(SQLException.class, () -> md.isNullable(idx), at);
+            assertThrows(SQLException.class, () -> md.isSigned(idx), at);
+            assertThrows(SQLException.class, () -> md.getPrecision(idx), at);
+            assertThrows(SQLException.class, () -> md.getScale(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterType(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterTypeName(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterClassName(idx), at);
+            assertThrows(SQLException.class, () -> md.getParameterMode(idx), at);
+        }
+        // In-range access must keep working.
+        assertEquals(ParameterMetaData.parameterNullableUnknown, md.isNullable(1));
     }
 
     @Test

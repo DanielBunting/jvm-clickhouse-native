@@ -62,6 +62,35 @@ class ChResultSetGetObjectTypedTest {
         assertThrows(SQLException.class, () -> rs.getObject(1, Integer.class));
     }
 
+    /**
+     * Zoned/local views of a DateTime column derive from the boxed {@link Instant}
+     * at UTC: {@code getObject(..., ZonedDateTime/OffsetDateTime/LocalDateTime.class)}
+     * all report the same absolute instant with a UTC zone/offset.
+     */
+    @Test
+    void coercions_temporalViewsOfInstantAreUtc() throws Exception {
+        Instant when = Instant.parse("2026-01-02T03:04:05Z");
+        ChResultSet rs = RsFixtures.open(
+                RsFixtures.complexCol("t", "DateTime", new DateTimeCodec(null), when));
+        assertTrue(rs.next());
+        assertEquals(when.atZone(java.time.ZoneOffset.UTC),
+                rs.getObject(1, java.time.ZonedDateTime.class));
+        assertEquals(when.atOffset(java.time.ZoneOffset.UTC),
+                rs.getObject(1, java.time.OffsetDateTime.class));
+        assertEquals(java.time.LocalDateTime.of(2026, 1, 2, 3, 4, 5),
+                rs.getObject(1, java.time.LocalDateTime.class));
+    }
+
+    /** The temporal view coercions only apply to Instant-boxed columns; a numeric column cannot masquerade as one. */
+    @Test
+    void coercions_temporalViewsOfNonTemporalColumnThrow() throws Exception {
+        ChResultSet rs = RsFixtures.open(RsFixtures.complexCol("n", "Int64", new Int64Codec(), 42L));
+        assertTrue(rs.next());
+        assertThrows(SQLException.class, () -> rs.getObject(1, java.time.ZonedDateTime.class));
+        assertThrows(SQLException.class, () -> rs.getObject(1, java.time.OffsetDateTime.class));
+        assertThrows(SQLException.class, () -> rs.getObject(1, java.time.LocalDateTime.class));
+    }
+
     @Test
     void unknownTargetType_throws() throws Exception {
         ChResultSet rs = RsFixtures.open(RsFixtures.complexCol("n", "Int64", new Int64Codec(), 42L));

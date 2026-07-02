@@ -49,6 +49,9 @@ final class ChResultSet implements ResultSet {
     private final List<String> columnNames;
     private final Iterator<Block> blocks;
 
+    /** The statement that produced this result set, or {@code null} when detached. */
+    private final ChStatement statement;
+
     private Block currentBlock;
     private int rowInBlock = -1;
     private boolean closed;
@@ -56,15 +59,29 @@ final class ChResultSet implements ResultSet {
     private boolean afterLast;
 
     /**
-     * Wraps a core {@link QueryResult}. The block iterator is pulled lazily; no
-     * data is read until {@link #next()} is first called.
+     * Wraps a core {@link QueryResult} with no producing statement (metadata and other
+     * statement-free producers). The block iterator is pulled lazily; no data is read
+     * until {@link #next()} is first called.
      *
      * @param result the core query result to expose; must not be {@code null}
      */
     ChResultSet(QueryResult result) {
+        this(result, null);
+    }
+
+    /**
+     * Wraps a core {@link QueryResult} produced by a statement, so
+     * {@link #getStatement()} can honor the JDBC contract and {@link #close()} can
+     * notify the statement for {@code closeOnCompletion}.
+     *
+     * @param result    the core query result to expose; must not be {@code null}
+     * @param statement the producing statement; may be {@code null} for detached results
+     */
+    ChResultSet(QueryResult result, ChStatement statement) {
         this.result = result;
         this.columnNames = result.columnNames();
         this.blocks = result.blocks();
+        this.statement = statement;
     }
 
     // -----------------------------------------------------------------------
@@ -77,23 +94,31 @@ final class ChResultSet implements ResultSet {
         if (afterLast) {
             return false;
         }
-        while (true) {
-            if (currentBlock != null && rowInBlock + 1 < currentBlock.rowCount()) {
-                rowInBlock++;
-                return true;
+        try {
+            while (true) {
+                if (currentBlock != null && rowInBlock + 1 < currentBlock.rowCount()) {
+                    rowInBlock++;
+                    return true;
+                }
+                if (!blocks.hasNext()) {
+                    currentBlock = null;
+                    afterLast = true;
+                    return false;
+                }
+                Block next = blocks.next();
+                if (next == null || next.isEmpty()) {
+                    continue; // skip empty/terminator blocks
+                }
+                currentBlock = next;
+                rowInBlock = -1;
+                // loop continues; will advance into row 0 on the next iteration
             }
-            if (!blocks.hasNext()) {
-                currentBlock = null;
-                afterLast = true;
-                return false;
-            }
-            Block next = blocks.next();
-            if (next == null || next.isEmpty()) {
-                continue; // skip empty/terminator blocks
-            }
-            currentBlock = next;
-            rowInBlock = -1;
-            // loop continues; will advance into row 0 on the next iteration
+        } catch (io.github.danielbunting.clickhouse.ClickHouseException e) {
+            // A server error can arrive MID-STREAM (e.g. max_result_rows overflow or a
+            // max_execution_time abort) from the lazy block pull; per the JDBC contract
+            // it must surface as an SQLException, not a raw unchecked ClickHouseException.
+            afterLast = true;
+            throw ChStatement.wrap(e);
         }
     }
 
@@ -103,6 +128,9 @@ final class ChResultSet implements ResultSet {
             closed = true;
             currentBlock = null;
             result.close();
+            if (statement != null) {
+                statement.resultSetClosed(this);
+            }
         }
     }
 
@@ -451,7 +479,7 @@ final class ChResultSet implements ResultSet {
 
     @Override
     public Statement getStatement() {
-        return null;
+        return statement;
     }
 
     @Override
@@ -482,8 +510,11 @@ final class ChResultSet implements ResultSet {
     }
 
     @Override
-    public void setFetchSize(int rows) {
-        // hint ignored; blocks are server-sized
+    public void setFetchSize(int rows) throws SQLException {
+        if (rows < 0) {
+            throw new SQLException("fetchSize must be >= 0");
+        }
+        // positive hint ignored; blocks are server-sized
     }
 
     @Override
@@ -583,6 +614,21 @@ final class ChResultSet implements ResultSet {
         }
         if (type == Timestamp.class) {
             return JdbcValues.toTimestamp(v);
+        }
+        // Zoned/local views of a temporal column: derived from the boxed Instant at UTC
+        // (the driver's temporal contract is the absolute instant; the column timezone
+        // only affects how the SERVER interprets wall-clock literals). Callers wanting a
+        // different zone call withZoneSameInstant/atZone themselves. (Identity requests
+        // — Instant-to-Instant, LocalDate-to-LocalDate — never reach this method: the
+        // only caller returns via type.isInstance(v) first.)
+        if (type == java.time.ZonedDateTime.class && v instanceof java.time.Instant instant) {
+            return instant.atZone(java.time.ZoneOffset.UTC);
+        }
+        if (type == java.time.OffsetDateTime.class && v instanceof java.time.Instant instant) {
+            return instant.atOffset(java.time.ZoneOffset.UTC);
+        }
+        if (type == java.time.LocalDateTime.class && v instanceof java.time.Instant instant) {
+            return java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC);
         }
         return null;
     }

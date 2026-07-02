@@ -167,6 +167,12 @@ public class QueryParameters private constructor(
                 is ByteArray -> String(value, StandardCharsets.UTF_8)
                 is java.sql.Timestamp -> formatDateTime(value.toLocalDateTime())
                 is Instant -> formatDateTime(LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+                // Zone-carrying temporals render as their UTC wall clock (the zone shifts
+                // the instant, then drops out of the text), mirroring the JDBC literal path.
+                is java.time.ZonedDateTime ->
+                    formatDateTime(LocalDateTime.ofInstant(value.toInstant(), ZoneOffset.UTC))
+                is java.time.OffsetDateTime ->
+                    formatDateTime(LocalDateTime.ofInstant(value.toInstant(), ZoneOffset.UTC))
                 is LocalDateTime -> formatDateTime(value)
                 is java.sql.Date -> value.toLocalDate().toString()
                 is LocalDate -> value.toString()
@@ -174,9 +180,67 @@ public class QueryParameters private constructor(
                 // IPv4/IPv6: the canonical numeric address, which the server casts to
                 // IPv4/IPv6 (java.net.InetAddress.toString() would prepend the hostname).
                 is java.net.InetAddress -> value.hostAddress
+                // Composites travel as ClickHouse literal text — the server's parameter
+                // parser reads the same [..]/{..:..} grammar as SQL literals (verified
+                // empirically: quoted strings inside, backslash escapes, bare NULL).
+                is List<*> -> renderArray(value)
+                is Map<*, *> -> renderMap(value)
                 // String and any other reference type: its textual representation. The server
                 // casts this to the placeholder's declared type, so no SQL quoting is applied.
                 else -> value.toString()
+            }
+        }
+
+        private fun renderArray(list: List<*>): String {
+            val sb = StringBuilder("[")
+            for ((i, e) in list.withIndex()) {
+                if (i > 0) sb.append(',')
+                appendElement(sb, e)
+            }
+            return sb.append(']').toString()
+        }
+
+        private fun renderMap(map: Map<*, *>): String {
+            val sb = StringBuilder("{")
+            var first = true
+            for ((k, v) in map) {
+                if (!first) sb.append(',')
+                first = false
+                appendElement(sb, k)
+                sb.append(':')
+                appendElement(sb, v)
+            }
+            return sb.append('}').toString()
+        }
+
+        /**
+         * Renders one ELEMENT of a composite value. Unlike the top-level [toText]
+         * (where the server casts unquoted text against the declared type), elements
+         * inside an array/map literal follow SQL-literal rules: strings, temporals,
+         * UUIDs and IPs are single-quoted with `\`/`'` backslash-escaped; `null` is
+         * the bare `NULL` keyword; nested lists/maps recurse.
+         */
+        private fun appendElement(sb: StringBuilder, value: Any?) {
+            when (value) {
+                null -> sb.append("NULL")
+                is Boolean -> sb.append(if (value) "true" else "false")
+                is BigDecimal -> sb.append(value.toPlainString())
+                is Number, is BigInteger -> sb.append(value.toString())
+                is List<*> -> sb.append(renderArray(value))
+                is Map<*, *> -> sb.append(renderMap(value))
+                else -> {
+                    // Everything textual (String, temporals, UUID, IP) is quoted using the
+                    // scalar rendering as its content.
+                    val text = toText(value) ?: "NULL"
+                    sb.append('\'')
+                    for (c in text) {
+                        if (c == '\\' || c == '\'') {
+                            sb.append('\\')
+                        }
+                        sb.append(c)
+                    }
+                    sb.append('\'')
+                }
             }
         }
     }

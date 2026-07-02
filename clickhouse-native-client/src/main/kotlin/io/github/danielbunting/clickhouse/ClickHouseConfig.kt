@@ -554,19 +554,23 @@ public class ClickHouseConfig private constructor(b: Builder) {
 
             val b = builder().endpoints(parsedEndpoints)
 
-            // User-info: user[:password]
-            val userInfo = uri.userInfo
+            // User-info: user[:password]. Parsed from the RAW authority rather than
+            // uri.userInfo: the JDK percent-decodes userInfo before we can split it
+            // (so an encoded %3A would be mistaken for the separator), and it returns
+            // null outright for registry-based authorities (e.g. hosts containing
+            // '_'). Split at the first LITERAL ':', then percent-decode each part.
+            val userInfo = extractUserInfo(url)
             if (!userInfo.isNullOrEmpty()) {
                 val colonIdx = userInfo.indexOf(':')
                 if (colonIdx == -1) {
-                    b.username(userInfo)
+                    b.username(percentDecode(userInfo))
                 } else {
                     val user = userInfo.substring(0, colonIdx)
                     val pass = userInfo.substring(colonIdx + 1)
                     if (user.isNotEmpty()) {
-                        b.username(user)
+                        b.username(percentDecode(user))
                     }
-                    b.password(pass)
+                    b.password(percentDecode(pass))
                 }
             }
 
@@ -674,10 +678,12 @@ public class ClickHouseConfig private constructor(b: Builder) {
         @JvmStatic
         public fun fromUrl(url: String?, info: java.util.Properties?): ClickHouseConfig {
             val base = fromUrl(url)
-            if (info == null || info.isEmpty) {
+            if (info == null) {
                 return base
             }
 
+            // No isEmpty short-circuit: Hashtable.isEmpty() ignores entries a caller
+            // supplied as Properties DEFAULTS, while getProperty() consults them.
             var user = info.getProperty("user")
             if (user == null) {
                 user = info.getProperty("username")
@@ -721,11 +727,28 @@ public class ClickHouseConfig private constructor(b: Builder) {
         }
 
         /**
-         * Extracts the comma-separated host-list portion of a `chnative://` URL — the
-         * authority after any `user[:password]@` prefix and before the path/query. The
-         * result may carry one or many `host[:port]` entries.
+         * Extracts the raw (still percent-encoded) `user[:password]` portion of a
+         * `chnative://` URL authority — the text before the last literal `@` — or
+         * `null` when the URL carries no credentials.
          */
-        private fun extractHostList(url: String): String {
+        private fun extractUserInfo(url: String): String? {
+            val authority = extractAuthority(url)
+            val at = authority.lastIndexOf('@')
+            return if (at >= 0) authority.substring(0, at) else null
+        }
+
+        /**
+         * Percent-decodes one raw URL component per RFC 3986 (UTF-8): only `%XX`
+         * escapes are decoded. A literal `'+'` is ordinary data here — `'+'`-as-space
+         * is form encoding (`application/x-www-form-urlencoded`), which never applies
+         * to URL components — so it is pre-escaped to survive [java.net.URLDecoder]'s
+         * form-decoding verbatim.
+         */
+        private fun percentDecode(s: String): String =
+            java.net.URLDecoder.decode(s.replace("+", "%2B"), Charsets.UTF_8)
+
+        /** The full raw authority of a `chnative://` URL (userinfo + host list). */
+        private fun extractAuthority(url: String): String {
             val afterScheme = url.substring("chnative://".length)
             var authorityEnd = afterScheme.length
             val slash = afterScheme.indexOf('/')
@@ -736,7 +759,16 @@ public class ClickHouseConfig private constructor(b: Builder) {
             if (query >= 0) {
                 authorityEnd = minOf(authorityEnd, query)
             }
-            var authority = afterScheme.substring(0, authorityEnd)
+            return afterScheme.substring(0, authorityEnd)
+        }
+
+        /**
+         * Extracts the comma-separated host-list portion of a `chnative://` URL — the
+         * authority after any `user[:password]@` prefix and before the path/query. The
+         * result may carry one or many `host[:port]` entries.
+         */
+        private fun extractHostList(url: String): String {
+            var authority = extractAuthority(url)
             val at = authority.lastIndexOf('@')
             if (at >= 0) {
                 authority = authority.substring(at + 1)

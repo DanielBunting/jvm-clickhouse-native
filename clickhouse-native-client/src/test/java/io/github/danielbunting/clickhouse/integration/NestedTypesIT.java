@@ -121,4 +121,68 @@ class NestedTypesIT extends TypeRoundTripBase {
         }
         return got;
     }
+
+    /**
+     * A single-column {@code Nested(a UInt32)} (reference: ClickHouseNestedValueTest
+     * #testSingleValue): the degenerate one-field form still reassembles to
+     * {@code Array(Tuple(a UInt32))} — one 1-element tuple per entry — and the empty
+     * per-row case decodes to an empty list.
+     */
+    @Test
+    void nestedSingleColumnDecodeRoundTrips() {
+        withTable("nested_single", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, n Nested(a UInt32)) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, n.a) VALUES"
+                    + " (1, [10, 20]), (2, [])");
+
+            List<Object[]> rows = decode(conn, "SELECT n FROM " + table + " ORDER BY id");
+            assertEquals(2, rows.size());
+
+            List<?> n1 = assertInstanceOf(List.class, rows.get(0)[0], "Row 1 Nested");
+            assertEquals(2, n1.size());
+            List<?> e0 = assertInstanceOf(List.class, n1.get(0), "entry 0 tuple");
+            assertEquals(1, e0.size(), "single-column tuple arity");
+            assertEquals(10L, ((Number) e0.get(0)).longValue());
+
+            List<?> n2 = assertInstanceOf(List.class, rows.get(1)[0], "Row 2 Nested");
+            assertEquals(0, n2.size(), "empty Nested row decodes to an empty list");
+        });
+    }
+
+    /**
+     * ENCODE (reference: client-v2 writeNestedTests): with {@code flatten_nested = 0}
+     * the Nested column is a single {@code Array(Tuple(...))} column named {@code n},
+     * so a record field holding a {@code List} of tuple-Lists bulk-inserts through the
+     * existing Array+Tuple write path. (The default FLATTENED form is not encodable via
+     * the mapper — the sub-columns are named {@code n.a}/{@code n.b}, and dots cannot
+     * appear in record component names.)
+     */
+    @Test
+    void nestedNonFlattenedBulkEncodeRoundTrips() {
+        withTable("nested_enc", (conn, table) -> {
+            conn.execute("SET flatten_nested = 0");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, n Nested(a UInt32, b String)) ENGINE = MergeTree() ORDER BY id");
+
+            record NestedRow(long id, java.util.List<java.util.List<Object>> n) {}
+            List<NestedRow> input = List.of(
+                    new NestedRow(1, List.of(List.of(10L, "x"), List.of(20L, "y"))),
+                    new NestedRow(2, List.of()));
+
+            try (var inserter = conn.createBulkInserter(table, NestedRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT n FROM " + table + " ORDER BY id");
+            assertEquals(2, rows.size());
+            List<?> n1 = assertInstanceOf(List.class, rows.get(0)[0]);
+            assertEquals(2, n1.size());
+            assertTuple(n1.get(0), 10L, "x", "encoded entry 0");
+            assertTuple(n1.get(1), 20L, "y", "encoded entry 1");
+            assertEquals(0, ((List<?>) rows.get(1)[0]).size(), "empty row survives encode");
+        });
+    }
 }

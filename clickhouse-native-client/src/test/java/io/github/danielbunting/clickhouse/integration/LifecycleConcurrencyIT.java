@@ -474,11 +474,11 @@ class LifecycleConcurrencyIT extends IntegrationTestBase {
         });
     }
 
-    /** (4) An inserter closed WITHOUT complete() (after init started the INSERT) leaves the wire
-     * mid-stream; per the documented contract this poisons the connection so a pool discards
-     * it. This pins that contract. */
+    /** (4) An inserter closed WITHOUT complete() (after init started the INSERT) now ends the
+     * INSERT gracefully: close() discards buffered rows, sends the terminating empty block,
+     * and drains — the connection stays healthy and reusable, no pool discard cycle. */
     @Test
-    void bulkInserterClosedWithoutComplete_poisons() {
+    void bulkInserterClosedWithoutComplete_terminatesGracefully() {
         String table = uniqueTable("life_bulk_abort");
         assertTimeoutPreemptively(ofSeconds(60), () -> {
             try (ClickHouseConnection conn = ClickHouseConnection.open(config())) {
@@ -488,21 +488,17 @@ class LifecycleConcurrencyIT extends IntegrationTestBase {
                 BulkInserter<Row> inserter = conn.createBulkInserter(table, Row.class);
                 inserter.init();
                 inserter.add(new Row(1));
-                inserter.close(); // abandon WITHOUT complete()
+                inserter.close(); // abandon WITHOUT complete() — graceful termination
 
-                assertTrue(conn.isPoisoned(),
-                        "an inserter abandoned mid-INSERT must poison the connection (wire desynced)");
-                // close() still released the guard, so a fresh acquire does not deadlock —
-                // it fails fast on the (now desynced) connection rather than hanging. Reading
-                // the leftover INSERT-stream state surfaces as a protocol/EOF error.
-                assertThrows(RuntimeException.class,
-                        () -> conn.executeScalar("SELECT 1"),
-                        "a poisoned (mid-INSERT) connection must not silently succeed");
-                // No cleanup query here: the wire is desynced, so any further op on THIS
-                // connection would also fail. Drop the table over a fresh connection.
-            }
-            try (ClickHouseConnection cleanup = ClickHouseConnection.open(config())) {
-                cleanup.execute("DROP TABLE IF EXISTS " + table);
+                assertFalse(conn.isPoisoned(),
+                        "an abandoned inserter terminates the INSERT gracefully; the "
+                                + "connection stays healthy");
+                // The guard was released and the wire is in spec: the SAME connection works.
+                assertEquals(1L, conn.executeScalar("SELECT 1"),
+                        "connection reusable after the abandoned insert");
+                assertEquals(0L, conn.executeScalar("SELECT count() FROM " + table),
+                        "buffered rows are discarded, not committed");
+                conn.execute("DROP TABLE IF EXISTS " + table);
             }
         });
     }

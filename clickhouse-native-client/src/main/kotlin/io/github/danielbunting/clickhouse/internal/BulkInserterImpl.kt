@@ -88,6 +88,14 @@ internal constructor(
     private var completed = false
     private var closed = false
 
+    /**
+     * Whether the server terminated this INSERT with an `Exception` packet (in
+     * [complete] or during init's sample-block read). A server exception is a TERMINAL,
+     * in-spec wire event: the query is over and the connection is reusable — [close]
+     * must neither poison nor try to send a terminating block after it.
+     */
+    private var serverErrored = false
+
     init {
         if (client == null) {
             throw IllegalArgumentException("client must not be null")
@@ -137,9 +145,17 @@ internal constructor(
         guard.acquire()
         try {
             initLocked()
+        } catch (e: io.github.danielbunting.clickhouse.ServerException) {
+            // The server rejected the INSERT (e.g. unknown table) with a terminal
+            // Exception packet: the query is over and the wire is in spec, so the
+            // connection remains reusable. Record it so close() stays a no-op.
+            serverErrored = true
+            guard.release()
+            throw e
         } catch (e: RuntimeException) {
-            // initLocked has already sent "INSERT INTO ... VALUES"; any failure leaves the
-            // connection mid-INSERT (the server is awaiting data), so it must not be reused.
+            // initLocked has already sent "INSERT INTO ... VALUES"; any other failure
+            // leaves the connection mid-INSERT (the server is awaiting data), so it
+            // must not be reused.
             client.markPoisoned()
             guard.release()
             throw e
@@ -301,9 +317,9 @@ internal constructor(
 
     override fun addRange(rows: Iterable<T>) {
         ensureInitialized()
-        if (rows == null) {
-            throw IllegalArgumentException("rows must not be null")
-        }
+        // No manual null check: the parameter is non-null in the BulkInserter contract,
+        // and Kotlin's compiler-generated parameter guard already rejects a null from
+        // Java callers before the body runs.
         for (row in rows) {
             add(row)
         }
@@ -327,17 +343,25 @@ internal constructor(
                         completed = true
                         return
                     }
-                    ServerPacket.EXCEPTION ->
+                    ServerPacket.EXCEPTION -> {
+                        serverErrored = true
                         throw msg.exception()!!
+                    }
                     ServerPacket.DATA, ServerPacket.TOTALS, ServerPacket.EXTREMES,
                     ServerPacket.PROGRESS, ServerPacket.PROFILE_INFO, ServerPacket.LOG,
                     ServerPacket.PROFILE_EVENTS -> {
                         // Trailing informational/echo packets; keep draining.
                     }
-                    else ->
+                    else -> {
+                        // The terminating empty block is already on the wire and an
+                        // unknown packet was consumed: the wire position is lost, so
+                        // close() must not send a second terminator and a pool must
+                        // discard this connection.
+                        client.markPoisoned()
                         throw ProtocolException(
                             "Unexpected packet while completing INSERT: " + msg.type()
                         )
+                    }
                 }
             }
         } finally {
@@ -379,12 +403,22 @@ internal constructor(
             return
         }
         closed = true
-        // An INSERT that started (initialized) but did not complete() cleanly leaves the
-        // connection mid-stream — the server is still awaiting data / a terminating block —
-        // so the wire is desynced and the connection must not be reused. Poison it so a pool
-        // discards (and replaces) it on return instead of recycling the dirty connection.
-        if (initialized && !completed) {
-            client.markPoisoned()
+        // An INSERT that started (initialized) but did not complete() leaves the server
+        // awaiting data. When the wire is still byte-clean (no I/O failure poisoned the
+        // client, and the server did not already terminate the query with an Exception
+        // packet), END the INSERT gracefully: discard any buffered-but-unflushed rows
+        // (abandonment must not commit surprise data), send the terminating empty block,
+        // and drain to END_OF_STREAM. The connection then stays healthy and reusable.
+        // Only if that graceful termination itself fails is the wire genuinely desynced,
+        // and only then is the connection poisoned (so a pool discards it).
+        if (initialized && !completed && !serverErrored && !client.isPoisoned()) {
+            try {
+                bufferedRows = 0
+                client.sendEmptyData()
+                drainQuietlyToEndOfStream()
+            } catch (t: Throwable) {
+                client.markPoisoned()
+            }
         }
         // Release the connection guard (idempotent — complete() may have released it).
         guard.release()
@@ -394,6 +428,35 @@ internal constructor(
         rowScratch = null
         mapper = null
         binders = null
+    }
+
+    /**
+     * Drains server messages until `END_OF_STREAM`, for [close]'s graceful termination.
+     * A server `Exception` here is terminal and in-spec (the INSERT is over either way),
+     * so it ends the drain WITHOUT throwing — close() must not mask the original error
+     * that aborted the insert. Any protocol violation propagates to close()'s catch,
+     * which poisons.
+     */
+    private fun drainQuietlyToEndOfStream() {
+        while (true) {
+            val msg = client.readMessage()
+            when (msg.type()) {
+                ServerPacket.END_OF_STREAM -> return
+                ServerPacket.EXCEPTION -> {
+                    serverErrored = true
+                    return
+                }
+                ServerPacket.DATA, ServerPacket.TOTALS, ServerPacket.EXTREMES,
+                ServerPacket.PROGRESS, ServerPacket.PROFILE_INFO, ServerPacket.LOG,
+                ServerPacket.PROFILE_EVENTS -> {
+                    // Trailing informational/echo packets; keep draining.
+                }
+                else ->
+                    throw ProtocolException(
+                        "Unexpected packet while terminating INSERT: " + msg.type()
+                    )
+            }
+        }
     }
 
     private fun ensureOpen() {

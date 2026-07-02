@@ -60,12 +60,17 @@ public final class ChDataSource implements DataSource {
 
     @Override
     public Connection getConnection() throws SQLException {
-        return open(new Properties(properties));
+        // A real entry copy — not new Properties(properties), which stores the
+        // configured entries only as defaults that Properties.isEmpty()/keys() ignore.
+        Properties copy = new Properties();
+        copy.putAll(properties);
+        return open(copy);
     }
 
     @Override
     public Connection getConnection(String username, String password) throws SQLException {
-        Properties merged = new Properties(properties);
+        Properties merged = new Properties();
+        merged.putAll(properties);
         if (username != null) {
             merged.setProperty("user", username);
         }

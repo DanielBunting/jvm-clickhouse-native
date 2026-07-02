@@ -1,16 +1,23 @@
 package io.github.danielbunting.clickhouse.jdbc.integration;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.danielbunting.clickhouse.ServerException;
 import io.github.danielbunting.clickhouse.test.ClickHouseImages;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.Transferable;
@@ -41,10 +48,23 @@ class JdbcErrorHandlingIT {
                             "/etc/clickhouse-server/users.d/zz-open-default.xml")
                     .waitingFor(Wait.forListeningPort());
 
-    private static Connection connect() throws SQLException {
-        String url = "jdbc:chnative://" + CLICKHOUSE.getHost() + ":"
+    private static String url() {
+        return "jdbc:chnative://" + CLICKHOUSE.getHost() + ":"
                 + CLICKHOUSE.getMappedPort(NATIVE_PORT) + "/default";
-        return DriverManager.getConnection(url);
+    }
+
+    private static Connection connect() throws SQLException {
+        return DriverManager.getConnection(url());
+    }
+
+    /** First core {@link ServerException} in the cause chain, or {@code null}. */
+    private static ServerException serverException(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof ServerException) {
+                return (ServerException) c;
+            }
+        }
+        return null;
     }
 
     @Test
@@ -86,6 +106,106 @@ class JdbcErrorHandlingIT {
                 ResultSet rs = st.executeQuery("SELECT 1 AS a")) {
             assertTrue(rs.next());
             assertThrows(SQLException.class, () -> rs.getInt("nope"));
+        }
+    }
+
+    /**
+     * A read that outlives the configured socket timeout fails at the JDBC layer with the
+     * {@link java.net.SocketTimeoutException} in the cause chain (ported from v1
+     * {@code ClickHouseStatementTest#testSocketTimeout}; the {@code socket_timeout}
+     * property maps to this driver's {@code socketTimeout} URL parameter, in seconds).
+     *
+     * <p>The server normally sends Progress packets every ~100ms while a query runs,
+     * which keeps the socket alive, so the test stretches {@code interactive_delay}
+     * beyond the sleep to make the connection genuinely idle. The thrown type is
+     * asserted loosely ({@code Exception}) to keep this test focused on the timeout
+     * cause; the mid-stream exception TYPE is covered by
+     * {@code JdbcStatementIT#midStreamServerErrorSurfacesAsSqlException}.
+     */
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void socketTimeoutSurfacesAsErrorWithSocketTimeoutCause() throws Exception {
+        Connection conn = DriverManager.getConnection(
+                url() + "?socketTimeout=1&settings.interactive_delay=10000000");
+        try {
+            Statement st = conn.createStatement();
+            Exception e = assertThrows(Exception.class, () -> {
+                try (ResultSet rs = st.executeQuery("SELECT sleep(2)")) {
+                    rs.next();
+                }
+            });
+            boolean timedOut = false;
+            for (Throwable c = e; c != null; c = c.getCause()) {
+                if (c instanceof java.net.SocketTimeoutException) {
+                    timedOut = true;
+                }
+            }
+            assertTrue(timedOut, "expected a SocketTimeoutException in the chain: " + e);
+        } finally {
+            try {
+                conn.close();
+            } catch (SQLException ignored) {
+                // The timed-out socket may fail the close handshake; irrelevant here.
+            }
+        }
+    }
+
+    /**
+     * {@link SQLException#getErrorCode()} carries the server's error code (here
+     * UNKNOWN_DATABASE = 81), per the JDBC vendor-code contract:
+     * {@code ChStatement.wrap} propagates {@code ServerException.code()} into the
+     * SQLException it builds (was knownBug 1; ported from jdbc-v2
+     * {@code JDBCErrorHandlingTests#testServerErrorCodePropagatedToSQLException}).
+     */
+    @Test
+    void serverErrorCodePropagatedToSqlExceptionGetErrorCode() throws Exception {
+        try (Connection conn = connect(); Statement st = conn.createStatement()) {
+            SQLException e = assertThrows(SQLException.class,
+                    () -> st.executeQuery("SELECT * FROM no_such_db_xyz.unknown_table"));
+            ServerException server = serverException(e);
+            assertNotNull(server, "sanity: the server error must be in the cause chain");
+            assertEquals(81, server.code(),
+                    "sanity: the cause carries UNKNOWN_DATABASE (81): " + e.getMessage());
+            // The actual contract under test — currently 0 (bug).
+            assertEquals(81, e.getErrorCode(),
+                    "SQLException.getErrorCode() must propagate the server error code");
+        }
+    }
+
+    /**
+     * A {@code max_execution_time} abort (TIMEOUT_EXCEEDED, code 159) arriving
+     * MID-STREAM surfaces from {@link ResultSet#next()} as an
+     * {@link SQLTimeoutException}, exactly as it does when the abort arrives at
+     * {@code executeQuery} time ({@code ChStatement.wrap} maps 159 to
+     * {@code SQLTimeoutException}). (was knownBug 44)
+     *
+     * <p>Shape: sleepEachRow(0.05) x 100 with max_block_size=1 streams the first
+     * 1-row blocks well before the 1s deadline (so executeQuery succeeds), then the
+     * server aborts ~1s in, during iteration.
+     */
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void midStreamTimeoutSurfacesAsSqlTimeoutException() throws Exception {
+        try (Connection conn = connect(); Statement st = conn.createStatement()) {
+            st.setQueryTimeout(1);
+            ResultSet rs = st.executeQuery(
+                    "SELECT number, sleepEachRow(0.05) FROM system.numbers LIMIT 100 "
+                    + "SETTINGS max_block_size = 1");
+            SQLException e = assertThrows(SQLException.class, () -> {
+                while (rs.next()) {
+                    // drain until the server-side abort arrives mid-stream
+                }
+            }, "the 1s timeout must abort the query during iteration");
+            // Sanity: prove the failure really is TIMEOUT_EXCEEDED arriving mid-stream
+            // (i.e. this is the right scenario, not some other error).
+            ServerException server = serverException(e);
+            assertNotNull(server, "sanity: the server abort must be in the cause chain: " + e);
+            assertEquals(159, server.code(),
+                    "sanity: the mid-stream abort is TIMEOUT_EXCEEDED (159): " + e.getMessage());
+            // The contract under test: code 159 maps to SQLTimeoutException mid-stream
+            // too, not only at executeQuery time.
+            assertInstanceOf(SQLTimeoutException.class, e,
+                    "a mid-stream TIMEOUT_EXCEEDED must surface as SQLTimeoutException");
         }
     }
 }

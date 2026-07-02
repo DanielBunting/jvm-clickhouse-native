@@ -70,6 +70,15 @@ public interface NativeClient : AutoCloseable {
     /** Sends a `Data` packet carrying [block] (insert path), compressed per config. */
     public fun sendData(block: Block)
 
+    /**
+     * Protocol-level liveness probe: sends a `Ping` packet and reports whether a
+     * `Pong` came back. Never throws — any failure (closed, poisoned, I/O, protocol)
+     * reports `false`.
+     */
+    public fun ping(): Boolean {
+        return false
+    }
+
     /** Sends the terminating empty `Data` block that ends an insert stream. */
     public fun sendEmptyData()
 

@@ -160,12 +160,20 @@ public constructor(precision: Int, zoneId: ZoneId?) : ColumnCodec<LongArray> {
         val epochSecond = instant.epochSecond
         val nano = instant.nano // always in [0, 999_999_999]
 
-        // Convert epoch-second component to ticks
-        val ticksFromSeconds = epochSecond * ticksPerSecond
-        // Convert nanosecond component to ticks (truncating toward zero is correct
-        // here because nano is always non-negative — Instant guarantees this)
-        val ticksFromNanos = nano / nanosPerTick
-        array[row] = ticksFromSeconds + ticksFromNanos
+        try {
+            // Convert epoch-second component to ticks. At high precision the Int64 tick
+            // count overflows for far-away instants (±292 years at precision 9); reject
+            // those rather than silently wrapping the wire value.
+            val ticksFromSeconds = Math.multiplyExact(epochSecond, ticksPerSecond)
+            // Convert nanosecond component to ticks (truncating toward zero is correct
+            // here because nano is always non-negative — Instant guarantees this)
+            val ticksFromNanos = nano / nanosPerTick
+            array[row] = Math.addExact(ticksFromSeconds, ticksFromNanos)
+        } catch (e: ArithmeticException) {
+            throw IllegalArgumentException(
+                "DateTime64($precision) value $instant is outside the representable range: " +
+                    "the Int64 tick count (one tick = 10^-$precision s) overflows", e)
+        }
     }
 
     /**

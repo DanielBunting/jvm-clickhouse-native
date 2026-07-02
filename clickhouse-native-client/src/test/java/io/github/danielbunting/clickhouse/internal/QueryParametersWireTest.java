@@ -94,8 +94,12 @@ class QueryParametersWireTest {
 
         assertEquals("maybe", r.readString());
         assertEquals(EXPECTED_CUSTOM_FLAG, r.readVarUInt());
-        // A NULL binding dumps as the bare Field token NULL (not a quoted string).
-        assertEquals("NULL", r.readString());
+        // A NULL binding dumps as the quoted STRING '\N' — exactly what
+        // clickhouse-client sends for --param_x='\N'. The server parses the restored
+        // string per the placeholder type, where \N means NULL for Nullable(T). (A
+        // bare NULL Field token is rejected by contexts that parse the value as
+        // quoted text, e.g. INSERT ... VALUES — verified live on 25.8, was bug 19.)
+        assertEquals("'\\\\N'", r.readString());
         assertEquals("", r.readString());
     }
 

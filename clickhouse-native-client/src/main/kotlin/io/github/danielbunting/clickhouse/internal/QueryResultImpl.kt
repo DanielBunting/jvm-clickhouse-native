@@ -60,6 +60,44 @@ constructor(
     /** True once [onRelease] has run (ensures the connection is released at most once). */
     private var released = false
 
+    // ---- summary accumulation (Progress packets are increments; ProfileInfo is final) ----
+    private var readRows = 0L
+    private var readBytes = 0L
+    private var totalRowsToRead = 0L
+    private var writtenRows = 0L
+    private var writtenBytes = 0L
+    private var elapsedNanos = 0L
+    private var appliedLimit = false
+    private var rowsBeforeLimit = 0L
+
+    /** Folds one server message into the running summary; returns the message. */
+    private fun observe(msg: ServerMessage): ServerMessage {
+        val progress = msg.progress()
+        if (progress != null) {
+            readRows += progress.rows
+            readBytes += progress.bytes
+            if (progress.totalRows > totalRowsToRead) {
+                totalRowsToRead = progress.totalRows
+            }
+            writtenRows += progress.writtenRows
+            writtenBytes += progress.writtenBytes
+            elapsedNanos += progress.elapsedNanos
+        }
+        val profile = msg.profileInfo()
+        if (profile != null) {
+            appliedLimit = profile.appliedLimit
+            rowsBeforeLimit = profile.rowsBeforeLimit
+        }
+        return msg
+    }
+
+    override fun summary(): io.github.danielbunting.clickhouse.QuerySummary {
+        return io.github.danielbunting.clickhouse.QuerySummary(
+            readRows, readBytes, totalRowsToRead,
+            writtenRows, writtenBytes, elapsedNanos,
+            appliedLimit, rowsBeforeLimit)
+    }
+
     /**
      * Reads the response stream up to and including the header (first `DATA`)
      * block, capturing the result schema.
@@ -74,7 +112,7 @@ constructor(
         var headerBlock: Block? = null
         // Pull packets until the schema-describing header DATA block appears.
         while (headerBlock == null) {
-            val msg = client.readMessage()
+            val msg = observe(client.readMessage())
             val type = msg.type()
             if (type == ServerPacket.DATA) {
                 // The first DATA packet is always the header (0-row schema) block.
@@ -134,7 +172,7 @@ constructor(
         // how the drain ends.
         try {
             while (!finished) {
-                val msg = client.readMessage()
+                val msg = observe(client.readMessage())
                 val type = msg.type()
                 if (type == ServerPacket.END_OF_STREAM) {
                     finished = true
@@ -197,7 +235,7 @@ constructor(
          */
         private fun pull(): Block? {
             while (true) {
-                val msg = client.readMessage()
+                val msg = observe(client.readMessage())
                 val type = msg.type()
                 if (type == ServerPacket.END_OF_STREAM) {
                     finished = true

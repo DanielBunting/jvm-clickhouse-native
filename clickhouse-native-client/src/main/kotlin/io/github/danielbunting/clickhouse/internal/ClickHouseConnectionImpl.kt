@@ -129,6 +129,19 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
         }
     }
 
+    override fun execute(
+        sql: String,
+        params: QueryParameters?,
+        settings: @JvmSuppressWildcards Map<String, String>,
+    ) {
+        guard.acquire()
+        try {
+            executeLocked(sql, settings, params)
+        } finally {
+            guard.release()
+        }
+    }
+
     private fun executeLocked(sql: String, settings: Map<String, String>?, params: QueryParameters?) {
         client.sendQuery(sql, settings, params)
         var finished = false
@@ -154,6 +167,14 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
 
     override fun query(sql: String, params: QueryParameters?): QueryResult {
         return queryInternal(sql, null, params)
+    }
+
+    override fun query(
+        sql: String,
+        params: QueryParameters?,
+        settings: @JvmSuppressWildcards Map<String, String>,
+    ): QueryResult {
+        return queryInternal(sql, settings, params)
     }
 
     private fun queryInternal(sql: String, settings: Map<String, String>?, params: QueryParameters?): QueryResult {
@@ -223,6 +244,22 @@ public constructor(private val client: NativeClient) : ClickHouseConnection {
 
     override fun isPoisoned(): Boolean {
         return client.isPoisoned()
+    }
+
+    override fun ping(): Boolean {
+        // The guard serializes the ping against any in-flight operation on this
+        // single-threaded connection. A held guard means an operation is actively
+        // streaming — the connection is demonstrably alive — and the socket must not
+        // be touched mid-stream, so a busy connection answers true without probing.
+        // tryAcquire (not acquire) keeps the interface's "never throws" contract.
+        if (!guard.tryAcquire()) {
+            return true
+        }
+        try {
+            return client.ping()
+        } finally {
+            guard.release()
+        }
     }
 
     override fun close() {

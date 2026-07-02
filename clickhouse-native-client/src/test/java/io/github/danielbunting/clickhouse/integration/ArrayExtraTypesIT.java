@@ -234,4 +234,66 @@ class ArrayExtraTypesIT extends TypeRoundTripBase {
                     "row3 multi element encode");
         });
     }
+
+    /**
+     * {@code Array(Nullable(Int64))} whose EVERY element is NULL (reference: client-v2
+     * QueryTests#testNullableArraysWithAllNulls): the inner null map must cover the whole
+     * array without collapsing it to an empty or null cell.
+     */
+    @Test
+    void arrayNullableAllNulls() {
+        withTable("arr_allnull", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, arr Array(Nullable(Int64))) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, arr) VALUES (1, [NULL, NULL, NULL])");
+
+            List<?> arr = singleArrayCell(
+                    decode(conn, "SELECT id, arr FROM " + table + " ORDER BY id"),
+                    "Array(Nullable(Int64)) all nulls");
+            assertEquals(3, arr.size(), "length preserved");
+            for (int i = 0; i < 3; i++) {
+                assertNull(arr.get(i), "elem " + i + " must be null");
+            }
+        });
+    }
+
+    /** Record for the {@code Array(UInt64)} high-range bulk-encode round trip. */
+    record UInt64ArrRow(long id, List<java.math.BigInteger> arr) {}
+
+    /**
+     * {@code Array(UInt64)} carrying values above {@code Long.MAX_VALUE} (reference:
+     * ClickHouseLongArrayValueTest#testConvertToBigInteger/#testConvertFromBigInteger):
+     * decode yields the raw-bit {@code Long} per element (unsigned via
+     * {@code Long.toUnsignedString}), and the ENCODE path accepts {@code BigInteger}
+     * elements in the high range, range-checked and stored as raw bits.
+     */
+    @Test
+    void arrayUInt64HighValuesRawBitsRoundTrip() {
+        withTable("arr_u64_hi", (conn, table) -> {
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, arr Array(UInt64)) ENGINE = MergeTree() ORDER BY id");
+
+            // ENCODE from BigInteger elements: 2^63 and 2^64-1.
+            java.math.BigInteger twoPow63 = java.math.BigInteger.TWO.pow(63);
+            java.math.BigInteger maxU64 = java.math.BigInteger.TWO.pow(64)
+                    .subtract(java.math.BigInteger.ONE);
+            List<UInt64ArrRow> input = List.of(
+                    new UInt64ArrRow(1, List.of(java.math.BigInteger.ONE, twoPow63, maxU64)));
+            try (var inserter = conn.createBulkInserter(table, UInt64ArrRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<?> arr = singleArrayCell(
+                    decode(conn, "SELECT id, arr FROM " + table + " ORDER BY id"),
+                    "Array(UInt64) high range");
+            assertEquals(3, arr.size());
+            assertEquals("1", Long.toUnsignedString((Long) arr.get(0)));
+            assertEquals(twoPow63.toString(), Long.toUnsignedString((Long) arr.get(1)),
+                    "2^63 decodes as its unsigned value via raw bits");
+            assertEquals(maxU64.toString(), Long.toUnsignedString((Long) arr.get(2)),
+                    "2^64-1 decodes as all-ones raw bits");
+        });
+    }
 }

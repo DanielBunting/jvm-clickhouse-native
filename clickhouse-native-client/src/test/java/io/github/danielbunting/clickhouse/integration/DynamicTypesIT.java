@@ -105,4 +105,226 @@ class DynamicTypesIT extends TypeRoundTripBase {
             assertNull(rows.get(2)[0], "row 3 should be NULL");
         });
     }
+
+    /**
+     * Temporal payloads inside Dynamic decode through their member codec's natural type
+     * (reference: client-v2 BinaryReaderTests testReadingLocalDateFromDynamic /
+     * testReadingInstantFromDynamic): Date -> LocalDate, DateTime64 -> Instant. The
+     * DateTime with an explicit server timezone keeps the absolute instant.
+     */
+    @Test
+    void dynamicTemporalMembersDecode() {
+        withTable("dynamic_temporal", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+            conn.execute("INSERT INTO " + table + " (id, d) VALUES"
+                    + " (1, '2021-03-04'::Date),"
+                    + " (2, '2021-03-04 15:06:27.123456'::DateTime64(6)),"
+                    + " (3, '2021-03-04 15:06:27'::DateTime('UTC'))");
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT d, dynamicType(d) FROM " + table + " ORDER BY id");
+            assertEquals(3, rows.size());
+
+            assertEquals(java.time.LocalDate.of(2021, 3, 4), rows.get(0)[0]);
+            assertEquals("Date", rows.get(0)[1]);
+
+            assertEquals(java.time.Instant.parse("2021-03-04T15:06:27.123456Z"), rows.get(1)[0]);
+            assertEquals("DateTime64(6)", rows.get(1)[1]);
+
+            assertEquals(java.time.Instant.parse("2021-03-04T15:06:27Z"), rows.get(2)[0]);
+            assertEquals("DateTime('UTC')", rows.get(2)[1]);
+        });
+    }
+
+    /**
+     * A Dynamic column whose member type is JSON NESTED IN A CONTAINER — here
+     * {@code Array(JSON)} — decodes: the row reads back as a {@code List} whose
+     * single element is the JSON object string {@code {"a":1}} (the server confirms the
+     * member type via {@code dynamicType} = {@code Array(JSON)}, asserted through a
+     * separate plain-String query). Member serialization prefixes are read through the
+     * uniform {@code ColumnCodec.readStatePrefix} recursion — container codecs
+     * (Array/Tuple/Map/Nullable/Variant) delegate to their element codecs, mirroring
+     * ClickHouse ISerialization — so the nested JSON prefix lands before the Dynamic
+     * discriminators exactly as the server writes it. (was knownBug 39)
+     */
+    @Test
+    void dynamicWithArrayOfJsonMemberDecodes() {
+        withTable("dynamic_array_json", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("SET allow_experimental_json_type = 1");
+
+            String dynExpr = "CAST(materialize([materialize('{\"a\":1}')::JSON]), 'Dynamic')";
+
+            // Server-side sanity (plain String result, unaffected by the bug): the
+            // member type really is Array(JSON).
+            List<Object[]> typeRows = decode(conn, "SELECT dynamicType(" + dynExpr + ")");
+            assertEquals("Array(JSON)", typeRows.get(0)[0],
+                    "precondition: the Dynamic member type must be Array(JSON)");
+
+            List<Object[]> rows = decode(conn, "SELECT " + dynExpr + " AS d");
+            assertEquals(1, rows.size());
+            Object v = rows.get(0)[0];
+            assertInstanceOf(List.class, v,
+                    "Array(JSON) inside Dynamic should decode to a List, was "
+                            + (v == null ? "null" : v.getClass().getName()));
+            List<?> list = (List<?>) v;
+            assertEquals(1, list.size());
+            assertInstanceOf(String.class, list.get(0),
+                    "JSON element should decode to its object String");
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    ((String) list.get(0)).contains("\"a\":1"),
+                    "element must carry a:1, was " + list.get(0));
+        });
+    }
+
+    /**
+     * ENCODE inference: temporals, UUID, wide integers, arrays and maps all infer a
+     * concrete ClickHouse type and round-trip through the flattened Dynamic write path.
+     */
+    @Test
+    void dynamicWidenedEncodeInferenceRoundTrips() {
+        withTable("dynamic_widened_enc", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+
+            java.math.BigInteger big = java.math.BigInteger.TWO.pow(100);
+            List<DRow> input = List.of(
+                    new DRow(1, java.time.LocalDate.of(2021, 3, 4)),
+                    new DRow(2, java.time.Instant.parse("2021-03-04T15:06:27.123456789Z")),
+                    new DRow(3, java.util.UUID.fromString("123e4567-e89b-12d3-a456-426614174000")),
+                    new DRow(4, big),
+                    new DRow(5, List.of(1L, 2L, 3L)),
+                    new DRow(6, java.util.Map.of("k", 7L)),
+                    new DRow(7, List.of()));
+
+            try (BulkInserter<DRow> inserter = conn.createBulkInserter(table, DRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT d, dynamicType(d) FROM " + table + " ORDER BY id");
+            assertEquals(7, rows.size());
+
+            assertEquals(java.time.LocalDate.of(2021, 3, 4), rows.get(0)[0]);
+            assertEquals("Date", rows.get(0)[1]);
+
+            assertEquals(java.time.Instant.parse("2021-03-04T15:06:27.123456789Z"), rows.get(1)[0]);
+            assertEquals("DateTime64(9)", rows.get(1)[1]);
+
+            assertEquals(java.util.UUID.fromString("123e4567-e89b-12d3-a456-426614174000"),
+                    rows.get(2)[0]);
+            assertEquals("UUID", rows.get(2)[1]);
+
+            assertEquals(big, rows.get(3)[0], "2^100 rides an Int128 tag");
+            assertEquals("Int128", rows.get(3)[1]);
+
+            assertEquals(List.of(1L, 2L, 3L), rows.get(4)[0]);
+            assertEquals("Array(Int64)", rows.get(4)[1]);
+
+            assertEquals(java.util.Map.of("k", 7L), rows.get(5)[0]);
+            assertEquals("Map(String, Int64)", rows.get(5)[1]);
+
+            assertEquals(List.of(), rows.get(6)[0], "empty array round-trips");
+            assertEquals("Array(Nothing)", rows.get(6)[1]);
+        });
+    }
+
+    /**
+     * ENCODE inference for the NULL-bearing and empty container shapes: a list with a
+     * null element infers {@code Array(Nullable(T))} from its first non-null element, a
+     * list of ONLY nulls infers {@code Array(Nullable(Nothing))} (the server's own type
+     * for {@code [NULL]}), an empty map infers the concrete {@code Map(String, String)},
+     * and a {@code BigInteger} too wide for Int128 rides an {@code Int256} tag. All
+     * round-trip through the flattened Dynamic write path and back.
+     */
+    @Test
+    void dynamicNullableArrayEmptyMapAndInt256Inference() {
+        withTable("dynamic_null_shapes", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+
+            java.math.BigInteger wide = java.math.BigInteger.TWO.pow(200);
+            List<DRow> input = List.of(
+                    new DRow(1, java.util.Arrays.asList(1L, null, 3L)),
+                    new DRow(2, java.util.Collections.singletonList(null)),
+                    new DRow(3, java.util.Map.of()),
+                    new DRow(4, wide));
+
+            try (BulkInserter<DRow> inserter = conn.createBulkInserter(table, DRow.class)) {
+                inserter.init();
+                inserter.addRange(input);
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn,
+                    "SELECT d, dynamicType(d) FROM " + table + " ORDER BY id");
+            assertEquals(4, rows.size());
+
+            assertEquals(java.util.Arrays.asList(1L, null, 3L), rows.get(0)[0],
+                    "null element must survive inside the array");
+            assertEquals("Array(Nullable(Int64))", rows.get(0)[1],
+                    "a null element makes the inferred array Nullable");
+
+            assertEquals(java.util.Collections.singletonList(null), rows.get(1)[0]);
+            assertEquals("Array(Nullable(Nothing))", rows.get(1)[1],
+                    "all-null array infers the server's own [NULL] type");
+
+            assertEquals(java.util.Map.of(), rows.get(2)[0], "empty map round-trips");
+            assertEquals("Map(String, String)", rows.get(2)[1],
+                    "empty map infers a concrete String/String map");
+
+            assertEquals(wide, rows.get(3)[0], "2^200 needs the Int256 tag");
+            assertEquals("Int256", rows.get(3)[1]);
+        });
+    }
+
+    /**
+     * ENCODE inference rejects a map with a null KEY or a null VALUE at {@code add()}
+     * time — before any block bytes exist — with an {@link IllegalArgumentException}
+     * (Dynamic map inference needs a concrete K/V from the first entry; a nullable
+     * value belongs in a typed column instead). The inserter/connection stay usable:
+     * a valid row still round-trips afterwards.
+     */
+    @Test
+    void dynamicMapWithNullKeyOrValueRejectedAtAdd() {
+        withTable("dynamic_null_map_kv", (conn, table) -> {
+            conn.execute("SET allow_experimental_dynamic_type = 1");
+            conn.execute("CREATE TABLE " + table
+                    + " (id UInt32, d Dynamic) ENGINE = MergeTree() ORDER BY id");
+
+            java.util.Map<String, Object> nullKey = new java.util.HashMap<>();
+            nullKey.put(null, 1L);
+            java.util.Map<String, Object> nullValue = new java.util.HashMap<>();
+            nullValue.put("k", null);
+
+            try (BulkInserter<DRow> inserter = conn.createBulkInserter(table, DRow.class)) {
+                inserter.init();
+
+                IllegalArgumentException exKey = org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class, () -> inserter.add(new DRow(1, nullKey)));
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        exKey.getMessage().contains("Map keys must be non-null"),
+                        "null-key message, was: " + exKey.getMessage());
+
+                IllegalArgumentException exVal = org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class, () -> inserter.add(new DRow(2, nullValue)));
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        exVal.getMessage().contains("Map values must be non-null"),
+                        "null-value message, was: " + exVal.getMessage());
+
+                inserter.add(new DRow(3, java.util.Map.of("k", 7L)));
+                inserter.complete();
+            }
+
+            List<Object[]> rows = decode(conn, "SELECT id, d FROM " + table + " ORDER BY id");
+            assertEquals(1, rows.size(), "only the valid row must land");
+            assertEquals(java.util.Map.of("k", 7L), rows.get(0)[1]);
+        });
+    }
 }

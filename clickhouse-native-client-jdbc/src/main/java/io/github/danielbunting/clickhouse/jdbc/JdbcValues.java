@@ -611,10 +611,21 @@ final class JdbcValues {
             return b ? 1L : 0L;
         }
         if (value instanceof java.math.BigInteger bi) {
-            return bi.longValueExact();
+            try {
+                return bi.longValueExact();
+            } catch (ArithmeticException e) {
+                // Wide ints (Int128/256, UInt64/128/256) box as BigInteger; a
+                // narrowing overflow is a JDBC conversion error, not a raw
+                // ArithmeticException.
+                throw new SQLException("Value " + bi + " out of range for " + target, e);
+            }
         }
         if (value instanceof BigDecimal bd) {
-            return bd.longValueExact();
+            try {
+                return bd.longValueExact();
+            } catch (ArithmeticException e) {
+                throw new SQLException("Value " + bd + " out of range for " + target, e);
+            }
         }
         if (value instanceof Number n) {
             return (long) n.doubleValue();

@@ -147,6 +147,24 @@ class JdbcValuesTest {
             assertEquals(3L, JdbcValues.toLong(3.99d));
         }
 
+        /**
+         * Decimal columns box as BigDecimal; an integral value converts exactly,
+         * while a fractional or out-of-long-range value is a JDBC conversion error
+         * (SQLException), not a raw ArithmeticException.
+         */
+        @Test
+        void longFromBigDecimalExactOrThrows() throws SQLException {
+            assertEquals(42L, JdbcValues.toLong(new BigDecimal("42")));
+            assertEquals(Long.MAX_VALUE,
+                    JdbcValues.toLong(new BigDecimal("9223372036854775807")));
+            assertThrows(SQLException.class,
+                    () -> JdbcValues.toLong(new BigDecimal("1.5")),
+                    "fractional Decimal cannot narrow to long");
+            assertThrows(SQLException.class,
+                    () -> JdbcValues.toLong(new BigDecimal("9223372036854775808")),
+                    "out-of-range Decimal cannot narrow to long");
+        }
+
         @Test
         void nonNumericStringThrows() {
             assertThrows(SQLException.class, () -> JdbcValues.toLong("abc"));
@@ -280,6 +298,19 @@ class JdbcValuesTest {
         void instantToTimestamp() throws SQLException {
             Instant i = Instant.parse("2026-05-30T12:34:56Z");
             Timestamp ts = JdbcValues.toTimestamp(i);
+            assertEquals(Timestamp.from(i), ts);
+        }
+
+        /**
+         * Nanosecond fidelity (reference: DataTypeUtilsTests
+         * #testToLocalDateTimeNanosPreservedWithTimeZone): sub-second precision must
+         * survive the Instant->Timestamp conversion to the full nine digits.
+         */
+        @Test
+        void instantToTimestampPreservesNanos() throws SQLException {
+            Instant i = Instant.parse("2026-05-30T12:34:56.123456789Z");
+            Timestamp ts = JdbcValues.toTimestamp(i);
+            assertEquals(123456789, ts.getNanos(), "all nine fractional digits preserved");
             assertEquals(Timestamp.from(i), ts);
         }
 

@@ -64,6 +64,25 @@ class EndpointSelectorTest {
                 "bracketed IPv6 literal without an explicit port defaults to 9000, not mis-parsed");
     }
 
+    /**
+     * Underscore hostnames (reference: client-v2 HttpEndpointTest — underscore hosts make
+     * {@code java.net.URI.getHost()} return null) survive multi-endpoint parsing, because
+     * the endpoint list is extracted with the client's own authority parser.
+     */
+    @Test
+    void parsesUnderscoreHostsInEndpointList() {
+        ClickHouseConfig cfg = ClickHouseConfig.fromUrl(
+                "chnative://ch_node_1:9000,ch_node_2:9001,plain-host/db");
+
+        assertEquals(
+                List.of(new Endpoint("ch_node_1", 9000),
+                        new Endpoint("ch_node_2", 9001),
+                        new Endpoint("plain-host", 9000)),
+                cfg.endpoints(),
+                "underscore hosts must not be dropped or nulled by java.net.URI host parsing");
+        assertEquals("db", cfg.database());
+    }
+
     @Test
     void parsesMixedIpv6AndIpv4EndpointList() {
         ClickHouseConfig cfg = ClickHouseConfig.fromUrl("chnative://[::1]:9000,10.0.0.5:9001/db");
@@ -123,5 +142,64 @@ class EndpointSelectorTest {
                 .attemptOrder();
         assertEquals(a, b, "same seed yields the same attempt order");
         assertEquals(3, a.size(), "all endpoints present, just reordered");
+    }
+
+    /**
+     * Round-robin distributes evenly under concurrency (reference:
+     * ClickHouseClusterTest#testGetNode / ClickHouseLoadBalancingPolicyTest#testRoundRobin —
+     * multi-threaded even distribution). The rotating start index is shared state; N
+     * threads each drawing an attempt order must see every endpoint as the first choice
+     * an equal number of times.
+     */
+    @Test
+    void roundRobinDistributesEvenlyAcrossThreads() throws Exception {
+        EndpointSelector sel = new EndpointSelector(THREE, LoadBalancingPolicy.ROUND_ROBIN);
+        int perEndpoint = 100;
+        int draws = THREE.size() * perEndpoint;
+
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(8);
+        java.util.concurrent.ConcurrentHashMap<Endpoint, java.util.concurrent.atomic.AtomicInteger>
+                firstChoice = new java.util.concurrent.ConcurrentHashMap<>();
+        try {
+            java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < draws; i++) {
+                futures.add(pool.submit(() -> firstChoice
+                        .computeIfAbsent(sel.attemptOrder().get(0),
+                                e -> new java.util.concurrent.atomic.AtomicInteger())
+                        .incrementAndGet()));
+            }
+            for (java.util.concurrent.Future<?> f : futures) {
+                f.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(3, firstChoice.size(), "every endpoint led at least one attempt order");
+        for (Endpoint e : THREE) {
+            assertEquals(perEndpoint, firstChoice.get(e).get(),
+                    "round-robin start index gives " + e + " exactly its share");
+        }
+    }
+
+    /**
+     * The RANDOM policy reaches every endpoint (reference:
+     * ClickHouseLoadBalancingPolicyTest#testRandom — random policy hits all nodes). With
+     * a seeded RNG the check is deterministic: across a modest number of draws each of
+     * the three endpoints leads the attempt order at least once, so no endpoint is
+     * unreachable under the random policy.
+     */
+    @Test
+    void randomPolicyEventuallyLeadsWithEveryEndpoint() {
+        EndpointSelector sel = new EndpointSelector(THREE, LoadBalancingPolicy.RANDOM, new Random(7));
+        java.util.Set<Endpoint> leaders = new java.util.HashSet<>();
+        for (int i = 0; i < 50 && leaders.size() < THREE.size(); i++) {
+            List<Endpoint> order = sel.attemptOrder();
+            assertEquals(3, order.size(), "every draw is a full permutation");
+            leaders.add(order.get(0));
+        }
+        assertEquals(java.util.Set.copyOf(THREE), leaders,
+                "every endpoint leads some attempt order under the random policy");
     }
 }

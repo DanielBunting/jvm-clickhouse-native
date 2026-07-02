@@ -82,6 +82,22 @@ class ReflectionRowMapperErrorTest {
         assertThrows(IllegalArgumentException.class, () -> mapper.map(new Object[]{"not-a-uuid"}));
     }
 
+    /**
+     * Factory contract (reference: RecordMapperFactoryTest#testGet): a null class is
+     * rejected up front, and an interface target builds leniently (no instance fields to
+     * infer) but cannot map a row — there is nothing to instantiate.
+     */
+    @Test
+    void forClass_nullClassThrows_andInterfaceTargetFailsOnlyOnMap() {
+        assertThrows(NullPointerException.class, () -> RowMappers.forClass(null));
+
+        // An interface has no instance fields, so inference yields zero columns and the
+        // build succeeds (same leniency as the write-only POJO case above)...
+        RowMapper<Runnable> mapper = RowMappers.forClass(Runnable.class);
+        // ...but the read path must fail: an interface cannot be instantiated.
+        assertThrows(ClickHouseException.class, () -> mapper.map(new Object[]{}));
+    }
+
     @Test
     void compositeListAndMap_passThroughMapperUnchanged() {
         record Composite(long id, List<String> tags, Map<String, Long> counts) {}

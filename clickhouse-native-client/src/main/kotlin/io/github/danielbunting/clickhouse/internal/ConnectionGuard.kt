@@ -41,6 +41,17 @@ public class ConnectionGuard {
         }
     }
 
+    /**
+     * Marks the connection in use by the current thread if it is free, returning
+     * whether ownership was taken. The non-throwing variant of [acquire] for callers
+     * (e.g. a liveness probe) that must treat "busy" as an answer, not an error.
+     *
+     * @return `true` if the guard was acquired; `false` if it is already in use
+     */
+    public fun tryAcquire(): Boolean {
+        return owner.compareAndSet(null, Thread.currentThread())
+    }
+
     /** Releases the connection (idempotent; may be called by any thread). */
     public fun release() {
         owner.set(null)

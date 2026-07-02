@@ -118,6 +118,77 @@ class ChResultSetMetaDataTest {
     }
 
     @Test
+    void perColumnConstantFlagsAndContainerNames() throws SQLException {
+        // Ported from jdbc-v2 ResultSetMetaDataImplTest.testConstants: every column of a
+        // read-only ClickHouse result reports the same fixed flags.
+        ChResultSetMetaData m = meta();
+        for (int i = 1; i <= m.getColumnCount(); i++) {
+            assertFalse(m.isAutoIncrement(i), "col " + i + ": no auto-increment in ClickHouse");
+            assertFalse(m.isWritable(i), "col " + i + ": result columns are not writable");
+            assertFalse(m.isDefinitelyWritable(i), "col " + i);
+            assertTrue(m.isReadOnly(i), "col " + i + ": result columns are read-only");
+            assertFalse(m.isCurrency(i), "col " + i);
+            assertTrue(m.isSearchable(i), "col " + i);
+            assertTrue(m.isCaseSensitive(i), "col " + i + ": CH identifiers are case-sensitive");
+            // The native protocol carries no per-column table/catalog/schema info; all
+            // report "" (the reference driver reports the connected database as schema).
+            assertEquals("", m.getTableName(i), "col " + i);
+            assertEquals("", m.getCatalogName(i), "col " + i);
+            assertEquals("", m.getSchemaName(i), "col " + i);
+        }
+        // The flag accessors still validate the 1-based index range.
+        assertThrows(SQLException.class, () -> m.isAutoIncrement(0));
+        assertThrows(SQLException.class, () -> m.isReadOnly(7));
+        assertThrows(SQLException.class, () -> m.getTableName(0));
+    }
+
+    @Test
+    void columnDisplaySizeIsUnspecified() throws SQLException {
+        // Display size is not derived from the CH type: 0 means "unknown" here
+        // (the reference driver returns a fixed 80). Index range is still validated.
+        ChResultSetMetaData m = meta();
+        assertEquals(0, m.getColumnDisplaySize(1), "UInt32");
+        assertEquals(0, m.getColumnDisplaySize(3), "Decimal(10, 2)");
+        assertThrows(SQLException.class, () -> m.getColumnDisplaySize(0));
+        assertThrows(SQLException.class, () -> m.getColumnDisplaySize(7));
+    }
+
+    @Test
+    void mapAndTupleColumnsMapToOtherWithObjectClass() throws SQLException {
+        // Ported from jdbc-v2 ResultSetMetaDataImplTest.testGetColumnTypeMap /
+        // testGetColumnTypeTuple: composite types with no JDBC counterpart report
+        // Types.OTHER and java.lang.Object.
+        ChResultSetMetaData m = new ChResultSetMetaData(
+                List.of("m", "t", "nm"),
+                List.of("Map(String, Int32)", "Tuple(String, UInt8)",
+                        "Map(String, Array(Nullable(DateTime64(3))))"));
+        for (int i = 1; i <= 3; i++) {
+            assertEquals(Types.OTHER, m.getColumnType(i), "col " + i + " -> OTHER");
+            assertEquals(Object.class.getName(), m.getColumnClassName(i), "col " + i);
+        }
+        assertEquals("Map(String, Int32)", m.getColumnTypeName(1), "raw type preserved");
+    }
+
+    /**
+     * Precision for non-decimal types (reference: jdbc-v2
+     * ResultSetMetaDataImplTest#testGetColumnPrecision, where {@code SELECT 1} — a
+     * UInt8 — reports precision 3, its max digit count). DEVIATION: this driver only
+     * derives precision from {@code Decimal(P, S)}; every other type reports 0
+     * ("unknown"), not the type's digit count.
+     */
+    @Test
+    void precisionIsZeroForNonDecimalTypes() throws SQLException {
+        ChResultSetMetaData m = new ChResultSetMetaData(
+                List.of("u8", "i64", "s", "d"),
+                List.of("UInt8", "Int64", "String", "Date"));
+        for (int i = 1; i <= 4; i++) {
+            assertEquals(0, m.getPrecision(i), "col " + i + ": no derived precision");
+        }
+        // The Decimal-derived path stays intact (see precisionAndScaleDerivedFromDecimalType).
+        assertEquals(10, meta().getPrecision(3));
+    }
+
+    @Test
     void indexOutOfRangeThrows() {
         ChResultSetMetaData m = meta();
         assertThrows(SQLException.class, () -> m.getColumnName(0), "column 0 is invalid (1-based)");
