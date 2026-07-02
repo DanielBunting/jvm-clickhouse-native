@@ -56,6 +56,145 @@ class ChStatementTest {
         assertFalse(ChStatement.producesResultSet(null), "null SQL is not result-producing");
     }
 
+    // ---- statement-kind matrix (ported from clickhouse-java v1
+    // ClickHouseSqlParserFacadeTest per-keyword tests and jdbc-v2
+    // BaseSqlParserFacadeTest#testStatementsForResultSet; jdbc-v2 is the source of
+    // truth for the hasResultSet expectation) ----------------------------------
+
+    /**
+     * DDL/DML/admin statement kinds route to the update path. Matches the jdbc-v2
+     * no-result-set matrix. Notes: DELETE/UPDATE client-side rewriting and USE
+     * database tracking are v1 features our driver does not have (N/A); only the
+     * classification is asserted here.
+     */
+    @Test
+    void producesResultSet_rejectsDdlDmlAndAdminStatements() {
+        String[] noResultSet = {
+                "ALTER TABLE alter_test ADD COLUMN Added0 UInt32",
+                "ALTER TABLE test_db.test_table UPDATE a = 1, \"b\" = '2', `c`=3.3 WHERE d=123 and e=456",
+                "ALTER TABLE tTt on cluster 'cc' delete WHERE d=123 and e=456",
+                "ATTACH TABLE IF NOT EXISTS t.t ON CLUSTER cluster",
+                "DETACH TABLE if exists t.t on cluster 'cc'",
+                "delete from a",
+                "DELETE FROM table WHERE a = 1 AND b = 2",
+                "GRANT SELECT(x,y) ON db.table TO john WITH GRANT OPTION",
+                "REVOKE SELECT(a,b) ON db1.tableA FROM `user01`",
+                "KILL QUERY WHERE query_id='2-857d-4a57-9ee0-327da5d60a90'",
+                "KILL MUTATION WHERE database = 'default' AND table = 'table'",
+                "OPTIMIZE TABLE table DEDUPLICATE",
+                "RENAME TABLE table_A TO table_A_bak, table_B TO table_B_bak",
+                "EXCHANGE TABLES table1 AND table2",
+                "SET profile = 'profile-name-from-the-settings-file'",
+                "SET ROLE role1",
+                "SYSTEM RELOAD DICTIONARIES",
+                "TRUNCATE TABLE `db1`.`table1`",
+                "TRUNCATE DATABASE IF EXISTS db",
+                "UPDATE hits SET Title = 'Updated Title' WHERE EventDate = today()",
+                "use system",
+                "MOVE USER test TO local_directory",
+                "UNDROP TABLE tab",
+                // WATCH streams live-view results in ClickHouse, but neither jdbc-v2's
+                // matrix nor our classifier treats it as result-producing.
+                "watch system.processes",
+        };
+        for (String sql : noResultSet) {
+            assertFalse(ChStatement.producesResultSet(sql), sql);
+        }
+    }
+
+    /** Result-producing variants beyond the basic forms already asserted above. */
+    @Test
+    void producesResultSet_acceptsShowDescribeExistsVariants() {
+        String[] hasResultSet = {
+                "SHOW CREATE TABLE `db`.`test_table`",
+                "SHOW PROCESSLIST",
+                "SHOW GRANTS FOR `user01`",
+                "SHOW SETTINGS LIKE 'send_timeout'",
+                "DESCRIBE TABLE (select 1::Uint32)",
+                "DESC TABLE table1",
+                "EXISTS TABLE `db`.`table01`",
+                "EXISTS DICTIONARY c",
+        };
+        for (String sql : hasResultSet) {
+            assertTrue(ChStatement.producesResultSet(sql), sql);
+        }
+    }
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): per the jdbc-v2 matrix
+     * (BaseSqlParserFacadeTest#testStatementsForResultSet and the CTE suite), EXPLAIN
+     * and CHECK statements and parenthesized SELECT/WITH queries all produce result
+     * sets, but the prefix classifier does not recognise them and routes them to the
+     * update path. Flip these assertions when the classifier learns these forms.
+     */
+    @Test
+    void knownBug_producesResultSetMisclassifiesExplainCheckAndParenthesizedQueries() {
+        // Should all be true.
+        assertFalse(ChStatement.producesResultSet("EXPLAIN SELECT 1"));
+        assertFalse(ChStatement.producesResultSet("EXPLAIN AST SELECT 1"));
+        assertFalse(ChStatement.producesResultSet(
+                "EXPLAIN SELECT sum(number) FROM numbers(10) GROUP BY number"));
+        assertFalse(ChStatement.producesResultSet("CHECK TABLE test_table"));
+        assertFalse(ChStatement.producesResultSet("CHECK GRANT SELECT(col2) ON table_2"));
+        assertFalse(ChStatement.producesResultSet("(SELECT 1)"));
+        assertFalse(ChStatement.producesResultSet("(with a as (select 1) select * from a)"));
+    }
+
+    /**
+     * Pins the lenient prefix-sniffing contract (v1 ClickHouseSqlParserFacadeTest
+     * #testParseNonSql classifies garbage as UNKNOWN; our classifier has no UNKNOWN):
+     * a bare or merged leading keyword is enough to classify as a query — there is no
+     * word-boundary check or tokenization. Invalid SQL simply rides whichever path the
+     * prefix selects and fails server-side.
+     */
+    @Test
+    void producesResultSet_sniffsKeywordPrefixWithoutWordBoundary() {
+        assertFalse(ChStatement.producesResultSet("invalid sql"));
+        assertTrue(ChStatement.producesResultSet("select"), "bare keyword");
+        assertTrue(ChStatement.producesResultSet("select (()"), "unbalanced garbage after keyword");
+        assertTrue(ChStatement.producesResultSet("SELECTION AND OTHER GARBAGE"), "merged keyword");
+        assertTrue(ChStatement.producesResultSet("SHOWCASE"), "merged keyword");
+        assertTrue(ChStatement.producesResultSet("DESCENDING"), "merged keyword");
+    }
+
+    // ---- comment-prefixed classification (ported from clickhouse-java
+    // jdbc-v2 StatementTest#testNewLineSQLParsing) -----------------------------
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): {@code producesResultSet} sniffs
+     * the first keyword after stripping leading <em>whitespace only</em>, so SQL that
+     * begins with a {@code --}/{@code #} line comment or a block comment is
+     * misclassified as non-result-producing. Per the clickhouse-java reference
+     * (jdbc-v2 StatementTest#testNewLineSQLParsing) every comment-prefixed query
+     * below should classify {@code true}. Flip these assertions when the classifier
+     * learns to skip leading comments.
+     */
+    @Test
+    void knownBug_producesResultSetMisclassifiesCommentPrefixedQueries() {
+        // Line-comment prefixes: should all be true.
+        assertFalse(ChStatement.producesResultSet("-- comment\nSELECT 1"));
+        assertFalse(ChStatement.producesResultSet(
+                "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;"));
+        assertFalse(ChStatement.producesResultSet(
+                "-- SELECT * FROM balance\n\nWITH balance_cte AS (SELECT 1) SELECT * FROM balance_cte;"));
+        assertFalse(ChStatement.producesResultSet("# hash comment\nSELECT 1"));
+        // Block-comment prefixes: should all be true (ClickHouse block comments nest).
+        assertFalse(ChStatement.producesResultSet("/* c */ SELECT 1"));
+        assertFalse(ChStatement.producesResultSet("/* outer /* nested */ still comment */ SELECT 1"));
+        assertFalse(ChStatement.producesResultSet("\n\t /* c */\n-- more\nSHOW TABLES"));
+        // Correct today and must stay false either way: keyword only inside the comment.
+        assertFalse(ChStatement.producesResultSet("-- SELECT looks like a query\nINSERT INTO t VALUES (1)"));
+        assertFalse(ChStatement.producesResultSet("/* SELECT */ INSERT INTO t VALUES (1)"));
+    }
+
+    @Test
+    void producesResultSet_commentOnlyOrBlankSqlIsNotAQuery() {
+        assertFalse(ChStatement.producesResultSet(""));
+        assertFalse(ChStatement.producesResultSet(" \n\t\r"));
+        assertFalse(ChStatement.producesResultSet("-- only a comment"));
+        assertFalse(ChStatement.producesResultSet("/* unterminated comment SELECT 1"));
+    }
+
     @Test
     void generatedKeysOverloadsAreUnsupported() {
         ChStatement s = stmt();
@@ -186,6 +325,23 @@ class ChStatementTest {
         assertEquals(-1, s.getUpdateCount());
     }
 
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): because {@code producesResultSet}
+     * does not skip leading comments, {@code execute()} sends a comment-prefixed
+     * SELECT down the <em>update</em> path ({@code core().execute}) and reports no
+     * result set. Per jdbc-v2 StatementTest#testNewLineSQLParsing it should return
+     * {@code true} and ride the query path. Flip this when the classifier is fixed.
+     */
+    @Test
+    void knownBug_executeRoutesCommentPrefixedSelectToUpdatePath() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        ChStatement s = connected(core);
+        String sql = "-- SELECT amount FROM balance FINAL;\n\nSELECT amount FROM balance FINAL;";
+        assertFalse(s.execute(sql), "should be true once comment-aware");
+        assertEquals(List.of(sql), core.executed, "should be routed to query(), not execute()");
+        assertTrue(core.queried.isEmpty());
+    }
+
     @Test
     void getMoreResultsReturnsFalseAndClosesResultSet() throws SQLException {
         RecordingCore core = new RecordingCore();
@@ -229,5 +385,88 @@ class ChStatementTest {
         s.close(); // idempotent
         assertTrue(s.isClosed());
         assertThrows(SQLException.class, () -> s.executeUpdate("INSERT INTO t VALUES (1)"));
+    }
+
+    // ---- enquoteLiteral / enquoteIdentifier / isSimpleIdentifier -------------
+    //
+    // Ported from clickhouse-java client-v2 SQLUtilsTest. ChStatement does not
+    // override these, so the JDK's java.sql.Statement default implementations
+    // apply; where the reference asserts ClickHouse-specific deviations we assert
+    // the JDK-default behavior instead and note the difference.
+
+    @Test
+    void enquoteLiteralSingleQuotesAndDoublesEmbeddedQuotes() throws SQLException {
+        ChStatement s = stmt();
+        assertEquals("'test 123'", s.enquoteLiteral("test 123"));
+        assertEquals("'こんにちは世界'", s.enquoteLiteral("こんにちは世界"));
+        assertEquals("'O''Reilly'", s.enquoteLiteral("O'Reilly"));
+        assertEquals("'😊👍'", s.enquoteLiteral("😊👍"));
+        assertEquals("''", s.enquoteLiteral(""));
+        assertEquals("'single''quote''double''''quote\"'",
+                s.enquoteLiteral("single'quote'double''quote\""));
+    }
+
+    /** Reference SQLUtils throws IllegalArgumentException; the JDK default NPEs on null. */
+    @Test
+    void enquoteLiteralNullInputThrowsNpe() {
+        assertThrows(NullPointerException.class, () -> stmt().enquoteLiteral(null));
+    }
+
+    @Test
+    void enquoteIdentifierQuotesOnlyWhenNeeded() throws SQLException {
+        ChStatement s = stmt();
+        // Simple identifiers pass through unquoted unless alwaysQuote is set.
+        for (String id : new String[] {"column1", "table_name", "a1b2c3", "ColumnName", "UPPERCASE"}) {
+            assertEquals(id, s.enquoteIdentifier(id, false), id);
+            assertEquals("\"" + id + "\"", s.enquoteIdentifier(id, true), id);
+        }
+        // Non-simple identifiers are double-quoted either way.
+        assertEquals("\"table.name\"", s.enquoteIdentifier("table.name", false));
+        assertEquals("\"column with spaces\"", s.enquoteIdentifier("column with spaces", false));
+        assertEquals("\"1column\"", s.enquoteIdentifier("1column", false));
+        assertEquals("\"column-with-hyphen\"", s.enquoteIdentifier("column-with-hyphen", false));
+        assertEquals("\"😊👍\"", s.enquoteIdentifier("😊👍", false));
+        // JDK default requires an *alpha* first character, so unlike the reference's
+        // SQLUtils, a leading underscore is not "simple" and gets quoted.
+        assertEquals("\"_id\"", s.enquoteIdentifier("_id", false));
+        // An already-quoted identifier is unwrapped and re-quoted.
+        assertEquals("\"foo.bar\"", s.enquoteIdentifier("\"foo.bar\"", false));
+    }
+
+    @Test
+    void enquoteIdentifierRejectsInvalidInput() {
+        ChStatement s = stmt();
+        // JDK default: length must be 1..128 (the reference's SQLUtils would quote "").
+        assertThrows(SQLException.class, () -> s.enquoteIdentifier("", false));
+        assertThrows(SQLException.class, () -> s.enquoteIdentifier("a".repeat(129), false));
+        // JDK default: embedded double quotes are invalid (the reference doubles them).
+        assertThrows(SQLException.class, () -> s.enquoteIdentifier("column\"with\"quotes", false));
+        assertThrows(SQLException.class, () -> s.enquoteIdentifier("ident\0null", false));
+        // JDK default NPEs on null (reference throws IllegalArgumentException).
+        assertThrows(NullPointerException.class, () -> s.enquoteIdentifier(null, false));
+        assertThrows(NullPointerException.class, () -> s.enquoteIdentifier(null, true));
+    }
+
+    @Test
+    void isSimpleIdentifierAcceptsAlphaThenAlnumUnderscore() throws SQLException {
+        ChStatement s = stmt();
+        for (String id : new String[] {
+                "Hello", "hello_world", "Hello123", "H", "a".repeat(128),
+                "testName", "TEST_NAME", "test123", "t123", "t"}) {
+            assertTrue(s.isSimpleIdentifier(id), id);
+        }
+    }
+
+    @Test
+    void isSimpleIdentifierRejectsSpecialsBoundsAndPunctuation() throws SQLException {
+        ChStatement s = stmt();
+        for (String id : new String[] {
+                "G'Day", "\"\"Bruce Wayne\"\"", "GoodDay$", "Hello\"\"World",
+                "\"\"Hello\"\"World\"\"", "", "123test", "_test", "test-name",
+                "test name", "test\"name", "test.name", "a".repeat(129)}) {
+            assertFalse(s.isSimpleIdentifier(id), id);
+        }
+        // JDK default NPEs on null (reference throws IllegalArgumentException).
+        assertThrows(NullPointerException.class, () -> s.isSimpleIdentifier(null));
     }
 }

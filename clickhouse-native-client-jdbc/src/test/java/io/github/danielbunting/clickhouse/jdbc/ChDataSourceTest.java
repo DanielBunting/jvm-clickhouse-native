@@ -35,6 +35,16 @@ class ChDataSourceTest {
     }
 
     @Test
+    void acceptsMultiEndpointUrl() {
+        // Reference: v1 ClickHouseDataSourceTest#testHighAvailabilityConfig — a
+        // DataSource built over a comma-separated endpoint list. Endpoint rotation and
+        // failover themselves are native-layer concerns (EndpointSelectorTest,
+        // FailoverConnectorTest); the DataSource must simply accept and retain the URL.
+        String haUrl = "jdbc:chnative://h1:9000,h2:9001/db?loadBalancingPolicy=round_robin";
+        assertEquals(haUrl, new ChDataSource(haUrl).getUrl());
+    }
+
+    @Test
     void loginTimeoutRoundTrips() {
         ChDataSource ds = new ChDataSource(URL);
         assertEquals(0, ds.getLoginTimeout());

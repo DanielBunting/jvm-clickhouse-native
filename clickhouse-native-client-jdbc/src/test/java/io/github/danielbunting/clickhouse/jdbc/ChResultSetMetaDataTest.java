@@ -118,6 +118,42 @@ class ChResultSetMetaDataTest {
     }
 
     @Test
+    void perColumnConstantFlagsAndContainerNames() throws SQLException {
+        // Ported from jdbc-v2 ResultSetMetaDataImplTest.testConstants: every column of a
+        // read-only ClickHouse result reports the same fixed flags.
+        ChResultSetMetaData m = meta();
+        for (int i = 1; i <= m.getColumnCount(); i++) {
+            assertFalse(m.isAutoIncrement(i), "col " + i + ": no auto-increment in ClickHouse");
+            assertFalse(m.isWritable(i), "col " + i + ": result columns are not writable");
+            assertFalse(m.isDefinitelyWritable(i), "col " + i);
+            assertTrue(m.isReadOnly(i), "col " + i + ": result columns are read-only");
+            assertFalse(m.isCurrency(i), "col " + i);
+            assertTrue(m.isSearchable(i), "col " + i);
+            assertTrue(m.isCaseSensitive(i), "col " + i + ": CH identifiers are case-sensitive");
+            // The native protocol carries no per-column table/catalog/schema info; all
+            // report "" (the reference driver reports the connected database as schema).
+            assertEquals("", m.getTableName(i), "col " + i);
+            assertEquals("", m.getCatalogName(i), "col " + i);
+            assertEquals("", m.getSchemaName(i), "col " + i);
+        }
+        // The flag accessors still validate the 1-based index range.
+        assertThrows(SQLException.class, () -> m.isAutoIncrement(0));
+        assertThrows(SQLException.class, () -> m.isReadOnly(7));
+        assertThrows(SQLException.class, () -> m.getTableName(0));
+    }
+
+    @Test
+    void columnDisplaySizeIsUnspecified() throws SQLException {
+        // Display size is not derived from the CH type: 0 means "unknown" here
+        // (the reference driver returns a fixed 80). Index range is still validated.
+        ChResultSetMetaData m = meta();
+        assertEquals(0, m.getColumnDisplaySize(1), "UInt32");
+        assertEquals(0, m.getColumnDisplaySize(3), "Decimal(10, 2)");
+        assertThrows(SQLException.class, () -> m.getColumnDisplaySize(0));
+        assertThrows(SQLException.class, () -> m.getColumnDisplaySize(7));
+    }
+
+    @Test
     void indexOutOfRangeThrows() {
         ChResultSetMetaData m = meta();
         assertThrows(SQLException.class, () -> m.getColumnName(0), "column 0 is invalid (1-based)");

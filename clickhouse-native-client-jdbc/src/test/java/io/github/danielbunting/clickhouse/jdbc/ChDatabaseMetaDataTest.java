@@ -262,6 +262,213 @@ class ChDatabaseMetaDataTest {
     }
 
     // -----------------------------------------------------------------------
+    // Broad capability-flag sweep (ported from jdbc-v2 DatabaseMetaDataTest
+    // #testSupportFlags). Where this driver deliberately deviates from the
+    // reference the actual value is pinned with a comment.
+    // -----------------------------------------------------------------------
+
+    @Test
+    void identifierStorageFlags() {
+        assertTrue(meta.supportsMixedCaseIdentifiers());
+        assertFalse(meta.storesUpperCaseIdentifiers());
+        // DEVIATION: reference reports storesLowerCaseIdentifiers()=true /
+        // storesMixedCaseIdentifiers()=false; ClickHouse identifiers are in fact
+        // case-sensitive, so this driver reports mixed-case storage.
+        assertFalse(meta.storesLowerCaseIdentifiers());
+        assertTrue(meta.storesMixedCaseIdentifiers());
+        // DEVIATION: reference reports supportsMixedCaseQuotedIdentifiers()=false.
+        assertTrue(meta.supportsMixedCaseQuotedIdentifiers());
+        assertFalse(meta.storesUpperCaseQuotedIdentifiers());
+        assertFalse(meta.storesLowerCaseQuotedIdentifiers());
+        assertTrue(meta.storesMixedCaseQuotedIdentifiers());
+        assertEquals("\\", meta.getSearchStringEscape());
+        assertEquals("", meta.getExtraNameCharacters());
+    }
+
+    @Test
+    void nullSortingAndSelectability() {
+        assertFalse(meta.allProceduresAreCallable());
+        assertTrue(meta.allTablesAreSelectable());
+        assertFalse(meta.nullsAreSortedHigh());
+        assertTrue(meta.nullsAreSortedLow());
+        assertFalse(meta.nullsAreSortedAtStart());
+        // DEVIATION: reference reports nullsAreSortedAtEnd()=true.
+        assertFalse(meta.nullsAreSortedAtEnd());
+        assertFalse(meta.usesLocalFiles());
+        assertFalse(meta.usesLocalFilePerTable());
+        assertTrue(meta.nullPlusNonNullIsNull());
+    }
+
+    @Test
+    void sqlGrammarAndJoinFlags() {
+        assertTrue(meta.supportsAlterTableWithAddColumn());
+        assertTrue(meta.supportsAlterTableWithDropColumn());
+        assertTrue(meta.supportsColumnAliasing());
+        assertFalse(meta.supportsConvert());
+        assertFalse(meta.supportsConvert(java.sql.Types.INTEGER, java.sql.Types.VARCHAR));
+        assertTrue(meta.supportsTableCorrelationNames());
+        assertFalse(meta.supportsDifferentTableCorrelationNames());
+        assertTrue(meta.supportsExpressionsInOrderBy());
+        assertTrue(meta.supportsOrderByUnrelated());
+        assertTrue(meta.supportsGroupByUnrelated());
+        assertTrue(meta.supportsGroupByBeyondSelect());
+        // DEVIATION: reference reports supportsLikeEscapeClause()=true.
+        assertFalse(meta.supportsLikeEscapeClause());
+        assertTrue(meta.supportsNonNullableColumns());
+        assertTrue(meta.supportsMinimumSQLGrammar());
+        // DEVIATION: reference claims core/extended grammar support.
+        assertFalse(meta.supportsCoreSQLGrammar());
+        assertFalse(meta.supportsExtendedSQLGrammar());
+        assertFalse(meta.supportsANSI92EntryLevelSQL());
+        assertFalse(meta.supportsANSI92IntermediateSQL());
+        assertFalse(meta.supportsANSI92FullSQL());
+        assertFalse(meta.supportsIntegrityEnhancementFacility());
+        assertTrue(meta.supportsOuterJoins());
+        assertTrue(meta.supportsFullOuterJoins());
+        assertTrue(meta.supportsLimitedOuterJoins());
+        assertTrue(meta.supportsUnion());
+        assertFalse(meta.supportsMultipleResultSets());
+        assertFalse(meta.supportsMultipleOpenResults());
+        assertFalse(meta.supportsMultipleTransactions());
+    }
+
+    @Test
+    void subqueryFlags() {
+        assertTrue(meta.supportsSubqueriesInComparisons());
+        // DEVIATION: reference reports supportsSubqueriesInExists()=false; ClickHouse
+        // does support EXISTS subqueries and this driver says so.
+        assertTrue(meta.supportsSubqueriesInExists());
+        assertTrue(meta.supportsSubqueriesInIns());
+        // DEVIATION: reference reports supportsSubqueriesInQuantifieds()=true.
+        assertFalse(meta.supportsSubqueriesInQuantifieds());
+        assertTrue(meta.supportsCorrelatedSubqueries());
+    }
+
+    /**
+     * A ClickHouse database maps to the JDBC <em>catalog</em> in this driver (there is
+     * no schema layer), so catalogs are supported in DML/DDL and schemas are not. The
+     * reference driver's configurable databaseTerm/schema_term property is N/A here.
+     */
+    @Test
+    void schemaAndCatalogSupportFlags() {
+        assertEquals("schema", meta.getSchemaTerm());
+        assertEquals("database", meta.getCatalogTerm());
+        assertEquals("procedure", meta.getProcedureTerm());
+        assertTrue(meta.isCatalogAtStart());
+        assertEquals(".", meta.getCatalogSeparator());
+        assertFalse(meta.supportsSchemasInDataManipulation());
+        assertFalse(meta.supportsSchemasInProcedureCalls());
+        assertFalse(meta.supportsSchemasInTableDefinitions());
+        assertFalse(meta.supportsSchemasInIndexDefinitions());
+        assertFalse(meta.supportsSchemasInPrivilegeDefinitions());
+        assertTrue(meta.supportsCatalogsInDataManipulation());
+        assertFalse(meta.supportsCatalogsInProcedureCalls());
+        assertTrue(meta.supportsCatalogsInTableDefinitions());
+        assertFalse(meta.supportsCatalogsInIndexDefinitions());
+        assertFalse(meta.supportsCatalogsInPrivilegeDefinitions());
+    }
+
+    @Test
+    void updateAndCursorFlags() {
+        assertFalse(meta.supportsPositionedDelete());
+        assertFalse(meta.supportsPositionedUpdate());
+        assertFalse(meta.supportsSelectForUpdate());
+        assertFalse(meta.supportsOpenCursorsAcrossCommit());
+        assertFalse(meta.supportsOpenCursorsAcrossRollback());
+        // DEVIATION: reference reports false for both; statements here are
+        // independent of the (non-existent) transaction boundary.
+        assertTrue(meta.supportsOpenStatementsAcrossCommit());
+        assertTrue(meta.supportsOpenStatementsAcrossRollback());
+        assertFalse(meta.supportsStoredFunctionsUsingCallSyntax());
+        assertFalse(meta.autoCommitFailureClosesAllResultSets());
+        assertFalse(meta.dataDefinitionCausesTransactionCommit());
+        assertFalse(meta.dataDefinitionIgnoredInTransactions());
+        assertFalse(meta.supportsDataManipulationTransactionsOnly());
+        assertFalse(meta.supportsDataDefinitionAndDataManipulationTransactions());
+    }
+
+    /**
+     * All limits are 0 ("unknown / no fixed limit"). DEVIATION: the reference reports
+     * fixed values for some (maxConnections=150, maxColumnsInTable=1000, ...).
+     */
+    @Test
+    void allLimitsReportZero() {
+        assertEquals(0, meta.getMaxBinaryLiteralLength());
+        assertEquals(0, meta.getMaxCharLiteralLength());
+        assertEquals(0, meta.getMaxColumnNameLength());
+        assertEquals(0, meta.getMaxColumnsInGroupBy());
+        assertEquals(0, meta.getMaxColumnsInIndex());
+        assertEquals(0, meta.getMaxColumnsInOrderBy());
+        assertEquals(0, meta.getMaxColumnsInSelect());
+        assertEquals(0, meta.getMaxColumnsInTable());
+        assertEquals(0, meta.getMaxConnections());
+        assertEquals(0, meta.getMaxCursorNameLength());
+        assertEquals(0, meta.getMaxIndexLength());
+        assertEquals(0, meta.getMaxSchemaNameLength());
+        assertEquals(0, meta.getMaxProcedureNameLength());
+        assertEquals(0, meta.getMaxCatalogNameLength());
+        assertEquals(0, meta.getMaxRowSize());
+        assertFalse(meta.doesMaxRowSizeIncludeBlobs());
+        assertEquals(0, meta.getMaxStatementLength());
+        assertEquals(0, meta.getMaxStatements());
+        assertEquals(0, meta.getMaxTableNameLength());
+        assertEquals(0, meta.getMaxTablesInSelect());
+        assertEquals(0, meta.getMaxUserNameLength());
+        assertEquals(0L, meta.getMaxLogicalLobSize());
+    }
+
+    @Test
+    void holdabilityStateTypeAndRowId() {
+        assertTrue(meta.supportsResultSetHoldability(ResultSet.CLOSE_CURSORS_AT_COMMIT));
+        assertFalse(meta.supportsResultSetHoldability(ResultSet.HOLD_CURSORS_OVER_COMMIT));
+        assertEquals(ResultSet.CLOSE_CURSORS_AT_COMMIT, meta.getResultSetHoldability());
+        assertEquals(DatabaseMetaData.sqlStateSQL, meta.getSQLStateType());
+        assertEquals(java.sql.RowIdLifetime.ROWID_UNSUPPORTED, meta.getRowIdLifetime());
+        assertFalse(meta.locatorsUpdateCopy());
+        assertEquals(2, meta.getJDBCMinorVersion());
+    }
+
+    @Test
+    void visibilityAndDetectionFlagsAllFalse() {
+        int[] types = {ResultSet.TYPE_FORWARD_ONLY, ResultSet.TYPE_SCROLL_INSENSITIVE,
+                ResultSet.TYPE_SCROLL_SENSITIVE};
+        for (int type : types) {
+            assertFalse(meta.ownUpdatesAreVisible(type));
+            assertFalse(meta.ownDeletesAreVisible(type));
+            assertFalse(meta.ownInsertsAreVisible(type));
+            assertFalse(meta.othersUpdatesAreVisible(type));
+            assertFalse(meta.othersDeletesAreVisible(type));
+            assertFalse(meta.othersInsertsAreVisible(type));
+            assertFalse(meta.updatesAreDetected(type));
+            assertFalse(meta.deletesAreDetected(type));
+            assertFalse(meta.insertsAreDetected(type));
+        }
+    }
+
+    @Test
+    void generatedKeysAndMiscFlags() {
+        assertFalse(meta.supportsGetGeneratedKeys());
+        assertFalse(meta.generatedKeyAlwaysReturned());
+        assertFalse(meta.supportsNamedParameters());
+        assertFalse(meta.supportsRefCursors());
+        assertFalse(meta.supportsStatementPooling());
+        assertFalse(meta.supportsSharding());
+    }
+
+    /**
+     * DEVIATION: the reference advertises long comma-separated function inventories;
+     * this driver honestly returns empty strings (query {@code system.functions}
+     * instead).
+     */
+    @Test
+    void functionListsAreEmpty() {
+        assertEquals("", meta.getNumericFunctions());
+        assertEquals("", meta.getStringFunctions());
+        assertEquals("", meta.getSystemFunctions());
+        assertEquals("", meta.getTimeDateFunctions());
+    }
+
+    // -----------------------------------------------------------------------
     // Minimal in-memory fake of the core connection
     // -----------------------------------------------------------------------
 

@@ -8,6 +8,7 @@ import io.github.danielbunting.clickhouse.ClickHouseConnection;
 import io.github.danielbunting.clickhouse.QueryResult;
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -112,6 +113,93 @@ class ChPreparedStatementTest {
         String result = ChPreparedStatement.substitute(
                 "SELECT ? FROM t WHERE note = 'really?' AND n = ?", values);
         assertEquals("SELECT 'x' FROM t WHERE note = 'really?' AND n = 5", result);
+    }
+
+    // ---- comment- and identifier-aware placeholder scanning (ported from
+    // clickhouse-java ClickHouseSqlParserFacadeTest#testComments and jdbc-v2
+    // BaseSqlParserFacadeTest INSERT_WITH_COMMENTS) ----------------------------
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): the placeholder scanner only
+     * understands single-quoted string literals, so a {@code ?} inside a {@code --}
+     * or {@code #} line comment or a block comment is counted as a bindable
+     * parameter. The clickhouse-java reference parser treats them as plain text;
+     * the correct count is noted on each case. Fix the counts when the scanner
+     * becomes comment-aware.
+     */
+    @Test
+    void knownBug_countPlaceholdersCountsQuestionMarksInsideComments() {
+        // Correct count: 1 (only the first '?').
+        assertEquals(4, ChPreparedStatement.countPlaceholders("select ?/* ?..? */ from x -- ?"));
+        // Correct count: 2 (only the VALUES tuple); jdbc-v2 INSERT_WITH_COMMENTS.
+        assertEquals(6, ChPreparedStatement.countPlaceholders(
+                "-- line comment1 ?\n"
+                        + "# line comment2 ?\n"
+                        + "#! line comment3 ?\n"
+                        + "/* block comment ? \n */"
+                        + "INSERT INTO t VALUES (?, ?);"));
+        // Correct count: 1 (ClickHouse block comments nest, hiding b? and c?).
+        assertEquals(3, ChPreparedStatement.countPlaceholders(
+                "select ? /* a /* b? */ c? */ from t"));
+        // Correct count: 0 (the '?' sits in an unterminated comment).
+        assertEquals(1, ChPreparedStatement.countPlaceholders("select 1 /* ? "));
+    }
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): the scanner does not recognise
+     * backtick- or double-quoted identifiers, so a {@code ?} inside a quoted
+     * identifier (legal in ClickHouse, see jdbc-v2's complex-id cases) is counted
+     * as a bindable parameter. Correct counts noted on each case.
+     */
+    @Test
+    void knownBug_countPlaceholdersCountsQuestionMarksInsideQuotedIdentifiers() {
+        // Correct count: 1 (`v?1` is an identifier).
+        assertEquals(2, ChPreparedStatement.countPlaceholders("SELECT `v?1` FROM t WHERE a = ?"));
+        // Correct count: 1 ("v?" is an identifier).
+        assertEquals(2, ChPreparedStatement.countPlaceholders("SELECT \"v?\" FROM t WHERE a = ?"));
+        // Correct count: 2 (only the VALUES tuple; doubled closing quotes stay inside).
+        assertEquals(4, ChPreparedStatement.countPlaceholders(
+                "INSERT INTO `with_complex_id`(`v?``1`, \"v?\"\"2\") VALUES (?, ?);"));
+    }
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): substitution consumes bound
+     * values for comment-hidden placeholders. With one binding for the single real
+     * placeholder, the '?' inside the comment then reports a missing parameter.
+     */
+    @Test
+    void knownBug_substituteConsumesValuesForCommentedPlaceholders() throws SQLException {
+        // Should produce "SELECT 5 /* keep ? */ FROM t -- tail ?".
+        assertThrows(SQLException.class, () -> ChPreparedStatement.substitute(
+                "SELECT ? /* keep ? */ FROM t -- tail ?", new Object[] {null, 5}));
+        // With surplus bindings the comment text itself is rewritten.
+        assertEquals("SELECT 1 -- 2", // should be "SELECT 1 -- ?"
+                ChPreparedStatement.substitute("SELECT ? -- ?", new Object[] {null, 1, 2}));
+    }
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): the server-side rewrite shares
+     * the scanner, so comment-hidden '?' also become named placeholders.
+     */
+    @Test
+    void knownBug_rewriteToNamedParamsRewritesCommentedPlaceholders() {
+        // Should leave the comments verbatim: "SELECT {_p1:String} /* ? */ -- ?\n".
+        assertEquals("SELECT {_p1:String} /* {_p2:String} */ -- {_p3:String}\n",
+                ChPreparedStatement.rewriteToNamedParams("SELECT ? /* ? */ -- ?\n"));
+    }
+
+    /**
+     * KNOWN BUG — pinned, not fixed (out of scope): comment-hidden '?' inflates the
+     * reported parameter count (jdbc-v2 #testParameterCount expects 1 here) and the
+     * phantom index is bindable.
+     */
+    @Test
+    void knownBug_parameterCountIncludesCommentedPlaceholders() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps = new ChPreparedStatement(
+                conn(core), "-- where id = ?\nSELECT * FROM t WHERE id = ?");
+        assertEquals(2, ps.getParameterMetaData().getParameterCount()); // should be 1
+        ps.setInt(2, 8); // should throw once the scanner is comment-aware
     }
 
     // ---- end-to-end through the statement -----------------------------------
@@ -236,6 +324,59 @@ class ChPreparedStatementTest {
         // Whole-second values stay terse (no trailing .000000000).
         Timestamp whole = Timestamp.valueOf("2026-05-30 13:45:07");
         assertEquals("'2026-05-30 13:45:07'", ChPreparedStatement.toLiteral(whole));
+    }
+
+    // ---- JDBC contract edges (ported from clickhouse-java jdbc-v2
+    // PreparedStatementTest and JdbcParameterizedQueryTest) --------------------
+
+    /**
+     * Blank SQL is accepted leniently with zero parameters. Note: jdbc-v2's parser
+     * rejects null/blank SQL up front; our driver performs no such validation and
+     * defers any failure to execution, so this pins the lenient contract. (Passing
+     * {@code null} SQL currently NPEs in the constructor — a known bug, reported
+     * separately rather than pinned here.)
+     */
+    @Test
+    void blankSqlPreparesWithZeroParameters() throws SQLException {
+        RecordingCore core = new RecordingCore();
+        assertEquals(0, new ChPreparedStatement(conn(core), "")
+                .getParameterMetaData().getParameterCount());
+        assertEquals(0, new ChPreparedStatement(conn(core), " \n\t\r")
+                .getParameterMetaData().getParameterCount());
+    }
+
+    /** Result-set metadata before execution is not supported by the native protocol. */
+    @Test
+    void getMetaDataBeforeExecutionThrowsNotSupported() {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps =
+                new ChPreparedStatement(conn(core), "SELECT * FROM t WHERE id = ?");
+        assertThrows(SQLFeatureNotSupportedException.class, ps::getMetaData);
+    }
+
+    /**
+     * JDBC spec (jdbc-v2 PreparedStatementTest#testMethodsNotAllowedToBeCalled): the
+     * String-argument execute/executeQuery/executeUpdate/addBatch overloads inherited
+     * from {@link java.sql.Statement} must throw on a PreparedStatement.
+     *
+     * <p>KNOWN SPEC VIOLATION (reported, not fixed here): {@code ChPreparedStatement}
+     * silently inherits {@code ChStatement}'s working {@code execute(String)},
+     * {@code executeQuery(String)}, {@code executeUpdate(String)} and
+     * {@code addBatch(String)}, so those succeed instead of throwing. Only the
+     * generated-keys String overloads throw today; this test pins that subset.
+     */
+    @Test
+    void stringArgGeneratedKeysOverloadsThrowOnPreparedStatement() {
+        RecordingCore core = new RecordingCore();
+        ChPreparedStatement ps =
+                new ChPreparedStatement(conn(core), "SELECT * FROM t WHERE id = ?");
+        String sql = "SELECT 1";
+        assertThrows(SQLException.class, () -> ps.execute(sql, java.sql.Statement.RETURN_GENERATED_KEYS));
+        assertThrows(SQLException.class, () -> ps.execute(sql, new int[]{1}));
+        assertThrows(SQLException.class, () -> ps.execute(sql, new String[]{"c"}));
+        assertThrows(SQLException.class, () -> ps.executeUpdate(sql, java.sql.Statement.RETURN_GENERATED_KEYS));
+        assertThrows(SQLException.class, () -> ps.executeUpdate(sql, new int[]{1}));
+        assertThrows(SQLException.class, () -> ps.executeUpdate(sql, new String[]{"c"}));
     }
 
     /**

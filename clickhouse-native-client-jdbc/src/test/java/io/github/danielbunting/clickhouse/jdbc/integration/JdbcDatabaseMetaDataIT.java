@@ -2,6 +2,7 @@ package io.github.danielbunting.clickhouse.jdbc.integration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.danielbunting.clickhouse.test.ClickHouseImages;
@@ -190,6 +191,111 @@ class JdbcDatabaseMetaDataIT {
                         "PK_NAME")),
                         "getPrimaryKeys must expose the 6 JDBC-standard columns");
             }
+        }
+    }
+
+    /**
+     * TABLE_TYPE classification (reference: jdbc-v2
+     * DatabaseMetaDataTest#testGetTablesReturnKnownTableTypes). DEVIATION: this driver
+     * classifies only {@code TABLE} vs {@code VIEW} (engines matching {@code %View});
+     * it does NOT report the reference's finer-grained {@code SYSTEM TABLE} /
+     * {@code MEMORY TABLE} types, so both a Memory-engine table and a system table are
+     * plain {@code TABLE}.
+     */
+    @Test
+    void getTablesClassifiesMemoryAndSystemTablesAsTableAndViewsAsView() throws Exception {
+        try (Connection conn = connect()) {
+            try (Statement st = conn.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS md_type_memory");
+                st.execute("CREATE TABLE md_type_memory (v Int32) ENGINE = Memory");
+                st.execute("DROP VIEW IF EXISTS md_type_view");
+                st.execute("CREATE VIEW md_type_view AS SELECT v FROM md_type_memory");
+            }
+            DatabaseMetaData md = conn.getMetaData();
+            try (ResultSet rs = md.getTables("default", null, "md_type_memory", null)) {
+                assertTrue(rs.next(), "the Memory-engine table must be listed");
+                assertEquals("TABLE", rs.getString("TABLE_TYPE"),
+                        "Memory engine classifies as plain TABLE (no MEMORY TABLE type)");
+            }
+            try (ResultSet rs = md.getTables("system", null, "numbers", null)) {
+                assertTrue(rs.next(), "system.numbers must be listed");
+                assertEquals("TABLE", rs.getString("TABLE_TYPE"),
+                        "system tables classify as plain TABLE (no SYSTEM TABLE type)");
+                assertEquals("numbers", rs.getString("TABLE_NAME"));
+            }
+            try (ResultSet rs = md.getTables("default", null, "md_type_view", null)) {
+                assertTrue(rs.next(), "the view must be listed");
+                assertEquals("VIEW", rs.getString("TABLE_TYPE"),
+                        "View engines classify as VIEW");
+            }
+        }
+    }
+
+    /**
+     * Empty schema-pattern semantics (reference: jdbc-v2
+     * DatabaseMetaDataTest#testGetColumnsWithEmptySchema, which returns no rows).
+     * DEVIATION: this driver maps ClickHouse databases to JDBC <em>catalogs</em> and
+     * ignores {@code schemaPattern} entirely (ClickHouse has no schema layer), so an
+     * empty schema pattern does not filter anything and the columns are still returned.
+     */
+    @Test
+    void getColumnsIgnoresEmptySchemaPattern() throws Exception {
+        try (Connection conn = connect()) {
+            DatabaseMetaData md = conn.getMetaData();
+            try (ResultSet rs = md.getColumns("system", "", "numbers", null)) {
+                assertTrue(rs.next(),
+                        "schemaPattern is ignored, so system.numbers columns are returned");
+                assertEquals("system", rs.getString("TABLE_CAT"));
+                assertEquals("number", rs.getString("COLUMN_NAME"));
+            }
+        }
+    }
+
+    /**
+     * Server version metadata matches the live server's {@code version()} (reference:
+     * jdbc-v2 DatabaseMetaDataTest#testGetServerVersions / testGetDatabaseMajorVersion /
+     * testGetDatabaseMinorVersion). Also pins {@code getUserName()}'s actual semantics.
+     */
+    @Test
+    void serverVersionMetadataMatchesLiveServer() throws Exception {
+        try (Connection conn = connect()) {
+            String serverVersion;
+            try (Statement st = conn.createStatement();
+                    ResultSet rs = st.executeQuery("SELECT version()")) {
+                assertTrue(rs.next());
+                serverVersion = rs.getString(1);
+            }
+            DatabaseMetaData md = conn.getMetaData();
+            assertEquals(serverVersion, md.getDatabaseProductVersion(),
+                    "getDatabaseProductVersion must be the server's version() string");
+            String[] parts = serverVersion.split("\\.");
+            assertEquals(Integer.parseInt(parts[0]), md.getDatabaseMajorVersion(),
+                    "major version (ClickHouse's calendar year)");
+            assertEquals(Integer.parseInt(parts[1]), md.getDatabaseMinorVersion(),
+                    "minor version");
+            assertTrue(md.getDatabaseMajorVersion() >= 21,
+                    "ClickHouse major versions are years, >= 21");
+            assertTrue(md.getDatabaseMinorVersion() > 0, "minor version is always > 0");
+
+            // DEVIATION (bug candidate): getUserName() reads clientInfo("user"), which is
+            // never populated from the connection's credentials, so it is null here even
+            // though the session authenticated as 'default'.
+            assertNull(md.getUserName(),
+                    "getUserName reflects (unset) client info, not the authenticated user");
+        }
+    }
+
+    /**
+     * The schema/catalog terms are fixed (reference: jdbc-v2 getSchemaTerm; its
+     * configurable {@code schema_term} property is N/A for this driver).
+     */
+    @Test
+    void schemaAndCatalogTermsAreFixed() throws Exception {
+        try (Connection conn = connect()) {
+            DatabaseMetaData md = conn.getMetaData();
+            assertEquals("schema", md.getSchemaTerm());
+            assertEquals("database", md.getCatalogTerm(),
+                    "a ClickHouse database is modelled as the JDBC catalog");
         }
     }
 }
