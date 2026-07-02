@@ -75,12 +75,24 @@ jobs:
         # deployment; the plain publish task would park it awaiting a manual
         # click in the Sonatype UI.
         run: ./gradlew publishAndReleaseToMavenCentral -PbuildVersion='${{ steps.version.outputs.version }}'
+      - name: Build downloadable release bundles
+        run: ./gradlew releaseBundles -PbuildVersion='${{ steps.version.outputs.version }}'
       - name: Tag and create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           V: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          ASSETS_DIR="build/release-assets"
+          # Fail fast before tagging if releaseBundles didn't produce every asset.
+          EXPECTED="jdbc.zip native-client.zip kotlin-query-flow.zip all-jars.zip"
+          for f in $EXPECTED; do
+            test -f "$ASSETS_DIR/$f" || { echo "Release asset not found: $ASSETS_DIR/$f" >&2; exit 1; }
+          done
           git tag "v$V"
           git push origin "v$V"
-          gh release create "v$V" --generate-notes --title "v$V"
+          gh release create "v$V" --generate-notes --title "v$V" \
+            "$ASSETS_DIR/jdbc.zip" \
+            "$ASSETS_DIR/native-client.zip" \
+            "$ASSETS_DIR/kotlin-query-flow.zip" \
+            "$ASSETS_DIR/all-jars.zip"

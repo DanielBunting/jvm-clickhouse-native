@@ -14,6 +14,53 @@ plugins {
     // Maven Central publishing (Central Portal): builds the sources/javadoc jars,
     // signs all artifacts, and uploads the bundle. Version pinned in the root build.
     id("com.vanniktech.maven.publish")
+    // Uber-jar for the downloadable native-client bundle (core + Kotlin stdlib + codecs).
+    id("com.gradleup.shadow")
+}
+
+// Self-contained core-client jar (core + Kotlin stdlib + lz4/zstd codecs) for the
+// native-client.zip release bundle. Codecs are bundled but not relocated (fixed
+// native-resource paths). Packaged by the root :releaseBundles task.
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    archiveBaseName.set("clickhouse-native-client")
+    archiveClassifier.set("all")
+    mergeServiceFiles()
+}
+
+// Keep the uber-jar OUT of the Maven Central publication (GitHub Release asset only).
+(components["java"] as org.gradle.api.component.AdhocComponentWithVariants)
+    .withVariantsFromConfiguration(configurations["shadowRuntimeElements"]) { skip() }
+
+val nativeClientBundleReadme = tasks.register("nativeClientBundleReadme") {
+    description = "README shipped inside native-client.zip."
+    val readme = layout.buildDirectory.file("bundle-readme/README.txt")
+    val v = project.version.toString()
+    outputs.file(readme)
+    doLast {
+        readme.get().asFile.writeText(
+            """
+            ClickHouse Native Client (core) $v — single-jar bundle
+            ======================================================
+
+            The core ClickHouse client over the native TCP protocol (port 9000),
+            bundled with the Kotlin stdlib and lz4/zstd codecs. Self-contained: add
+            clickhouse-native-client-$v-all.jar to the classpath, no other files needed.
+
+            Entry point (Java-callable):
+              io.github.danielbunting.clickhouse.ClickHouseConnection.open(config)
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
+// Packages the core-client uber-jar (+ README) into native-client.zip.
+tasks.register<Zip>("nativeClientBundle") {
+    group = "distribution"
+    description = "Packages the core-client uber-jar into native-client.zip."
+    archiveFileName.set("native-client.zip")
+    destinationDirectory.set(rootProject.layout.buildDirectory.dir("release-assets"))
+    from(tasks.named("shadowJar"))
+    from(nativeClientBundleReadme)
 }
 
 java {
