@@ -50,11 +50,11 @@ public constructor() : ColumnCodec<IntArray> {
         if (value == null) {
             array[row] = 0
         } else if (value is LocalDate) {
-            array[row] = value.toEpochDay().toInt()
+            array[row] = checkRange(value.toEpochDay()).toInt()
         } else if (value is Number) {
             array[row] = value.toInt()
         } else if (value is String) {
-            array[row] = LocalDate.parse(value.trim()).toEpochDay().toInt()
+            array[row] = checkRange(LocalDate.parse(value.trim()).toEpochDay()).toInt()
         } else {
             throw IllegalArgumentException(
                 "Cannot coerce " + value.javaClass.name + " to Date32"
@@ -74,5 +74,27 @@ public constructor() : ColumnCodec<IntArray> {
 
     override fun javaType(): Class<*> {
         return LocalDate::class.java
+    }
+
+    private companion object {
+        /** Day-offset of ClickHouse's `Date32` lower bound, 1900-01-01. */
+        val MIN_DAY: Long = LocalDate.of(1900, 1, 1).toEpochDay()
+
+        /** Day-offset of ClickHouse's `Date32` upper bound, 2299-12-31. */
+        val MAX_DAY: Long = LocalDate.of(2299, 12, 31).toEpochDay()
+
+        /**
+         * Rejects day-offsets outside ClickHouse's supported `Date32` range
+         * (1900-01-01..2299-12-31), mirroring server-side validation so callers fail
+         * fast instead of silently writing a truncated/out-of-range day count. Operates
+         * on the already-computed epoch day so the check is two `long` comparisons.
+         */
+        fun checkRange(day: Long): Long {
+            require(day in MIN_DAY..MAX_DAY) {
+                "Date32 value ${LocalDate.ofEpochDay(day)} is outside the supported range " +
+                    "${LocalDate.ofEpochDay(MIN_DAY)}..${LocalDate.ofEpochDay(MAX_DAY)}"
+            }
+            return day
+        }
     }
 }

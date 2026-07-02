@@ -84,6 +84,7 @@ final class ChResultSetMetaData implements ResultSetMetaData {
             case java.sql.Types.SMALLINT -> Short.class.getName();
             case java.sql.Types.INTEGER -> Integer.class.getName();
             case java.sql.Types.BIGINT -> Long.class.getName();
+            case java.sql.Types.NUMERIC -> java.math.BigInteger.class.getName();
             case java.sql.Types.REAL -> Float.class.getName();
             case java.sql.Types.DOUBLE -> Double.class.getName();
             case java.sql.Types.DECIMAL -> java.math.BigDecimal.class.getName();
@@ -119,14 +120,12 @@ final class ChResultSetMetaData implements ResultSetMetaData {
 
     @Override
     public int getPrecision(int column) throws SQLException {
-        idx(column);
-        return 0;
+        return JdbcValues.precision(columnTypes.get(idx(column)));
     }
 
     @Override
     public int getScale(int column) throws SQLException {
-        idx(column);
-        return 0;
+        return JdbcValues.scale(columnTypes.get(idx(column)));
     }
 
     @Override

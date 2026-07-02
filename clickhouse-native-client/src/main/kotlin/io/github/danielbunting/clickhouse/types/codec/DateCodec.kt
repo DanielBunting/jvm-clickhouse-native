@@ -70,8 +70,14 @@ public constructor() : ColumnCodec<IntArray> {
             array[row] = 0
         } else {
             val date = value as LocalDate
-            // toEpochDay() returns a long; safe cast — Date range is [0, 65535]
-            array[row] = date.toEpochDay().toInt()
+            val day = date.toEpochDay()
+            // Date is an unsigned 16-bit day count; reject anything that would
+            // wrap/truncate on the cast rather than silently corrupting the value.
+            require(day in 0..MAX_DAY) {
+                "Date value $date is outside the supported range " +
+                    "$EPOCH..${EPOCH.plusDays(MAX_DAY)}"
+            }
+            array[row] = day.toInt()
         }
     }
 
@@ -94,5 +100,8 @@ public constructor() : ColumnCodec<IntArray> {
 
     private companion object {
         val EPOCH: LocalDate = LocalDate.of(1970, 1, 1)
+
+        /** Largest day-offset representable in an unsigned 16-bit `Date` (2149-06-06). */
+        const val MAX_DAY: Long = 65535L
     }
 }

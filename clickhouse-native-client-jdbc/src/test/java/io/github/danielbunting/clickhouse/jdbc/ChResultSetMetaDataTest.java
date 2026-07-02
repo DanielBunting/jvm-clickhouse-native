@@ -85,6 +85,39 @@ class ChResultSetMetaDataTest {
     }
 
     @Test
+    void precisionAndScaleDerivedFromDecimalType() throws SQLException {
+        // Decimal(10, 2): JDBC precision is the total digit count, scale the fractional digits.
+        ChResultSetMetaData m = meta();
+        assertEquals(10, m.getPrecision(3), "Decimal(10, 2) -> precision 10");
+        assertEquals(2, m.getScale(3), "Decimal(10, 2) -> scale 2");
+    }
+
+    @Test
+    void scaleDerivedFromDateTime64Precision() throws SQLException {
+        // DateTime64(3): the (3) is the fractional-seconds precision -> JDBC scale 3.
+        assertEquals(3, meta().getScale(5), "DateTime64(3) -> scale 3");
+    }
+
+    @Test
+    void unsignedAndWideIntsMapToWidenedTypesWithBigIntegerClass() throws SQLException {
+        // Parity with clickhouse-java: unsigned/wide ints widen to a JDBC type that holds
+        // their full range; UInt64 and the 128/256-bit ints report NUMERIC -> BigInteger.
+        ChResultSetMetaData m = new ChResultSetMetaData(
+                List.of("a", "b", "c", "d", "e"),
+                List.of("UInt16", "UInt64", "Int128", "UInt256", "Nullable(UInt64)"));
+        assertEquals(Types.INTEGER, m.getColumnType(1), "UInt16 -> INTEGER");
+        assertEquals(Types.NUMERIC, m.getColumnType(2), "UInt64 -> NUMERIC");
+        assertEquals(Types.NUMERIC, m.getColumnType(3), "Int128 -> NUMERIC");
+        assertEquals(Types.NUMERIC, m.getColumnType(4), "UInt256 -> NUMERIC");
+        assertEquals(Types.NUMERIC, m.getColumnType(5), "Nullable(UInt64) unwraps to NUMERIC");
+
+        assertEquals(Integer.class.getName(), m.getColumnClassName(1));
+        assertEquals(java.math.BigInteger.class.getName(), m.getColumnClassName(2),
+                "NUMERIC maps to BigInteger, not Object");
+        assertEquals(java.math.BigInteger.class.getName(), m.getColumnClassName(3));
+    }
+
+    @Test
     void indexOutOfRangeThrows() {
         ChResultSetMetaData m = meta();
         assertThrows(SQLException.class, () -> m.getColumnName(0), "column 0 is invalid (1-based)");

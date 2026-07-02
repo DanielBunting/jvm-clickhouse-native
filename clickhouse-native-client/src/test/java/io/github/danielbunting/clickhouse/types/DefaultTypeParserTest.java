@@ -82,6 +82,28 @@ class DefaultTypeParserTest {
     }
 
     @Test
+    void parsesEnumNameWithDoubledQuoteEscape() {
+        // ClickHouse escapes an apostrophe inside an enum member by doubling it:
+        // 'Query''Start' denotes the name Query'Start.
+        Enum8Codec codec = (Enum8Codec) parser.parse("Enum8('Query''Start' = 1, 'b' = 2)");
+        assertEquals("Query'Start", codec.enumMap().get(1),
+                "doubled '' inside an enum name must collapse to a single quote");
+    }
+
+    @Test
+    void parsesEnumNameWithBackslashEscape() {
+        // Backslash-escaped apostrophe form: 'Query\'Finish' -> Query'Finish.
+        Enum8Codec codec = (Enum8Codec) parser.parse("Enum8('Query\\'Finish' = 1)");
+        assertEquals("Query'Finish", codec.enumMap().get(1));
+    }
+
+    @Test
+    void rejectsMalformedEnumEntry() {
+        // Non-numeric ordinal must be rejected rather than silently swallowed.
+        assertThrows(RuntimeException.class, () -> parser.parse("Enum8('x' = a)"));
+    }
+
+    @Test
     void parsesArray() {
         ColumnCodec<?> codec = parser.parse("Array(UInt32)");
         assertInstanceOf(ArrayColumnCodec.class, codec);

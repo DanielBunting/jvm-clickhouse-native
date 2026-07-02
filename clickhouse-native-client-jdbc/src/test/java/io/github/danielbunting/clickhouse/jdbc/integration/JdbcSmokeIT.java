@@ -72,4 +72,19 @@ class JdbcSmokeIT {
             assertFalse(rs.next(), "result set should have exactly one row");
         }
     }
+
+    @Test
+    @DisplayName("ChDataSource hands out working connections")
+    void dataSourceConnects() throws Exception {
+        String url = "jdbc:chnative://" + CLICKHOUSE.getHost() + ":"
+                + CLICKHOUSE.getMappedPort(NATIVE_PORT) + "/default";
+        io.github.danielbunting.clickhouse.jdbc.ChDataSource ds =
+                new io.github.danielbunting.clickhouse.jdbc.ChDataSource(url);
+        try (Connection conn = ds.getConnection();
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery("SELECT 42")) {
+            assertTrue(rs.next());
+            assertEquals(42, rs.getInt(1));
+        }
+    }
 }

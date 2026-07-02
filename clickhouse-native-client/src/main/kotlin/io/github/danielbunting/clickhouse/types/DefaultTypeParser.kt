@@ -543,7 +543,11 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
             return map
         }
 
-        /** Strips surrounding single quotes and unescapes `\'` and `\\`. */
+        /**
+         * Strips surrounding single quotes and unescapes `\'`/`\\` and the doubled-quote
+         * form `''` that ClickHouse uses to embed an apostrophe in an enum member name
+         * (e.g. `'Query''Start'` -> `Query'Start`).
+         */
         private fun unquote(s: String): String {
             var t = s.trim()
             if (t.length >= 2 && t[0] == '\'' && t[t.length - 1] == '\'') {
@@ -555,6 +559,10 @@ public constructor(defaultZone: ZoneId?) : TypeParser {
                 val c = t[i]
                 if (c == '\\' && i + 1 < t.length) {
                     sb.append(t[++i])
+                } else if (c == '\'' && i + 1 < t.length && t[i + 1] == '\'') {
+                    // Doubled '' collapses to a single quote; skip the second one.
+                    sb.append('\'')
+                    i++
                 } else {
                     sb.append(c)
                 }

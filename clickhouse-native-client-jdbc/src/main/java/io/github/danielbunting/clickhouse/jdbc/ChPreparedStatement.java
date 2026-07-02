@@ -64,6 +64,15 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
     private static final DateTimeFormatter TIMESTAMP_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    /**
+     * Sub-second variant used when a temporal binding carries a non-zero fractional
+     * part, so {@code DateTime64} precision survives client-side interpolation. Nine
+     * fractional digits (nanoseconds) match the codec's maximum {@code DateTime64(9)};
+     * ClickHouse truncates the extra digits for lower-precision columns.
+     */
+    private static final DateTimeFormatter TIMESTAMP_FRAC_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS");
+
     /** Generated parameter-name prefix for the server-side rewrite: {@code _p1, _p2, …}. */
     static final String PARAM_NAME_PREFIX = "_p";
 
@@ -191,12 +200,10 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
             return quote(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
         }
         if (value instanceof Timestamp ts) {
-            LocalDateTime ldt = ts.toLocalDateTime();
-            return quote(TIMESTAMP_FORMAT.format(ldt));
+            return quote(formatDateTime(ts.toLocalDateTime()));
         }
         if (value instanceof Instant instant) {
-            LocalDateTime ldt = LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
-            return quote(TIMESTAMP_FORMAT.format(ldt));
+            return quote(formatDateTime(LocalDateTime.ofInstant(instant, ZoneOffset.UTC)));
         }
         if (value instanceof Date date) {
             return quote(date.toLocalDate().toString());
@@ -210,8 +217,60 @@ public class ChPreparedStatement extends ChStatement implements PreparedStatemen
         if (value instanceof UUID) {
             return quote(value.toString());
         }
+        // IPv4/IPv6: the canonical numeric address (InetAddress.toString would prepend
+        // the hostname). ClickHouse casts the quoted string to IPv4/IPv6.
+        if (value instanceof java.net.InetAddress inet) {
+            return quote(inet.getHostAddress());
+        }
+        // Collections and arrays (except byte[], handled above) render as a ClickHouse
+        // array literal, e.g. ['a','b'] / [1,2] / [] (see issue clickhouse-java#2329).
+        if (value instanceof java.util.Collection || value.getClass().isArray()) {
+            return arrayLiteral(value);
+        }
         // Fallback: treat as string.
         return quote(value.toString());
+    }
+
+    /**
+     * Formats a temporal value as a ClickHouse date-time literal, appending a
+     * nine-digit (nanosecond) fractional part only when the value carries sub-second
+     * precision.
+     *
+     * @param ldt the local date-time
+     * @return {@code yyyy-MM-dd HH:mm:ss[.SSSSSSSSS]}
+     */
+    static String formatDateTime(LocalDateTime ldt) {
+        return (ldt.getNano() != 0 ? TIMESTAMP_FRAC_FORMAT : TIMESTAMP_FORMAT).format(ldt);
+    }
+
+    /**
+     * Renders a {@link java.util.Collection} or Java array (not {@code byte[]}) as a
+     * ClickHouse array literal, recursing through {@link #toLiteral(Object)} for each
+     * element (so strings are quoted, numbers bare, nested arrays bracketed).
+     *
+     * @param value a {@code Collection} or array value
+     * @return the array literal, e.g. {@code ['a','b']}
+     */
+    static String arrayLiteral(Object value) {
+        StringBuilder sb = new StringBuilder("[");
+        if (value instanceof java.util.Collection<?> c) {
+            int i = 0;
+            for (Object e : c) {
+                if (i++ > 0) {
+                    sb.append(',');
+                }
+                sb.append(toLiteral(e));
+            }
+        } else {
+            int n = java.lang.reflect.Array.getLength(value);
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                sb.append(toLiteral(java.lang.reflect.Array.get(value, i)));
+            }
+        }
+        return sb.append(']').toString();
     }
 
     /**

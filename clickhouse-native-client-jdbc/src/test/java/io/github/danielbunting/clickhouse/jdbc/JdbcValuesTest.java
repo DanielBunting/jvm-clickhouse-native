@@ -311,20 +311,26 @@ class JdbcValuesTest {
 
         @Test
         void integers() {
+            // Unsigned types widen to the next signed JDBC type that holds their full
+            // range, matching upstream clickhouse-java (jdbc-v2 JdbcUtils).
             assertEquals(Types.TINYINT, JdbcValues.sqlType("Int8"));
             assertEquals(Types.SMALLINT, JdbcValues.sqlType("UInt8"));
             assertEquals(Types.SMALLINT, JdbcValues.sqlType("Int16"));
-            assertEquals(Types.SMALLINT, JdbcValues.sqlType("UInt16"));
+            assertEquals(Types.INTEGER, JdbcValues.sqlType("UInt16"));
             assertEquals(Types.INTEGER, JdbcValues.sqlType("Int32"));
             assertEquals(Types.BIGINT, JdbcValues.sqlType("UInt32"));
             assertEquals(Types.BIGINT, JdbcValues.sqlType("Int64"));
-            assertEquals(Types.BIGINT, JdbcValues.sqlType("UInt64"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt64"));
         }
 
         @Test
-        void wideIntegersAreDecimal() {
-            assertEquals(Types.DECIMAL, JdbcValues.sqlType("Int128"));
-            assertEquals(Types.DECIMAL, JdbcValues.sqlType("UInt256"));
+        void wideIntegersAreNumeric() {
+            // 128/256-bit ints exceed long and box as BigInteger, so they map to NUMERIC
+            // (BigInteger), matching upstream clickhouse-java.
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("Int128"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt128"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("Int256"));
+            assertEquals(Types.NUMERIC, JdbcValues.sqlType("UInt256"));
         }
 
         @Test
@@ -389,6 +395,81 @@ class JdbcValuesTest {
         @Test
         void unknownIsOther() {
             assertEquals(Types.OTHER, JdbcValues.sqlType("Tuple(UInt8, String)"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // clickHouseLiteral / isComposite (getString rendering of composites)
+    // -----------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("clickHouseLiteral")
+    class ClickHouseLiteral {
+
+        @Test
+        void nullRendersAsKeyword() {
+            assertEquals("NULL", JdbcValues.clickHouseLiteral(null));
+        }
+
+        @Test
+        void numbersAndBooleansAreBare() {
+            assertEquals("42", JdbcValues.clickHouseLiteral(42));
+            assertEquals("3.5", JdbcValues.clickHouseLiteral(3.5));
+            assertEquals("true", JdbcValues.clickHouseLiteral(Boolean.TRUE));
+        }
+
+        @Test
+        void stringsAreQuotedAndEscaped() {
+            assertEquals("'hi'", JdbcValues.clickHouseLiteral("hi"));
+            assertEquals("'O\\'Brien'", JdbcValues.clickHouseLiteral("O'Brien"));
+            assertEquals("'a\\\\b'", JdbcValues.clickHouseLiteral("a\\b"));
+        }
+
+        @Test
+        void listsRenderWithSpacedSeparator() {
+            assertEquals("[1, 2, 3]", JdbcValues.clickHouseLiteral(java.util.List.of(1, 2, 3)));
+            assertEquals("['a', 'b']", JdbcValues.clickHouseLiteral(java.util.List.of("a", "b")));
+            assertEquals("[]", JdbcValues.clickHouseLiteral(java.util.List.of()));
+        }
+
+        @Test
+        void nestedListsRecurse() {
+            assertEquals("[[1, 2], [3]]",
+                    JdbcValues.clickHouseLiteral(java.util.List.of(java.util.List.of(1, 2), java.util.List.of(3))));
+        }
+
+        @Test
+        void mapsRenderKeyColonValue() {
+            java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+            m.put("a", 1);
+            m.put("b", 2);
+            assertEquals("{'a': 1, 'b': 2}", JdbcValues.clickHouseLiteral(m));
+        }
+
+        @Test
+        void javaArraysRenderLikeLists() {
+            assertEquals("[1, 2]", JdbcValues.clickHouseLiteral(new int[] {1, 2}));
+            assertEquals("['x', 'y']", JdbcValues.clickHouseLiteral(new String[] {"x", "y"}));
+        }
+    }
+
+    @Nested
+    @DisplayName("isComposite")
+    class IsComposite {
+
+        @Test
+        void trueForListMapAndNonByteArray() {
+            assertTrue(JdbcValues.isComposite(java.util.List.of(1)));
+            assertTrue(JdbcValues.isComposite(new java.util.HashMap<>()));
+            assertTrue(JdbcValues.isComposite(new int[] {1}));
+        }
+
+        @Test
+        void falseForScalarsNullAndByteArray() {
+            assertFalse(JdbcValues.isComposite(null));
+            assertFalse(JdbcValues.isComposite("s"));
+            assertFalse(JdbcValues.isComposite(42));
+            assertFalse(JdbcValues.isComposite(new byte[] {1, 2}));
         }
     }
 }

@@ -242,6 +242,82 @@ final class JdbcValues {
     }
 
     /**
+     * Renders a value the way ClickHouse displays it, so {@code getString} on a
+     * composite column (Array/Map/Tuple) returns a faithful literal rather than a
+     * Java {@code toString}. Lists render as {@code [e1, e2]}, maps as
+     * {@code {k: v}}, strings are single-quoted (with {@code \} and {@code '}
+     * escaped), numbers/booleans are bare, and other scalars are quoted via their
+     * {@code toString}. Recurses for nested composites.
+     *
+     * @param value the boxed value, may be {@code null}
+     * @return the ClickHouse-style literal, or {@code null} if the input is {@code null}
+     */
+    static String clickHouseLiteral(Object value) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof java.util.List<?> list) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(clickHouseLiteral(list.get(i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (value instanceof java.util.Map<?, ?> map) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (java.util.Map.Entry<?, ?> e : map.entrySet()) {
+                if (!first) {
+                    sb.append(", ");
+                }
+                first = false;
+                sb.append(clickHouseLiteral(e.getKey())).append(": ").append(clickHouseLiteral(e.getValue()));
+            }
+            return sb.append('}').toString();
+        }
+        if (value.getClass().isArray() && !(value instanceof byte[])) {
+            int n = java.lang.reflect.Array.getLength(value);
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(clickHouseLiteral(java.lang.reflect.Array.get(value, i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        String s = String.valueOf(value);
+        StringBuilder sb = new StringBuilder(s.length() + 2).append('\'');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' || c == '\'') {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.append('\'').toString();
+    }
+
+    /**
+     * True when {@code value} is a composite (List/Map/non-byte array) that should be
+     * rendered via {@link #clickHouseLiteral(Object)} by {@code getString}.
+     *
+     * @param value the boxed value, may be {@code null}
+     * @return whether the value is a renderable composite
+     */
+    static boolean isComposite(Object value) {
+        return value instanceof java.util.List
+                || value instanceof java.util.Map
+                || (value != null && value.getClass().isArray() && !(value instanceof byte[]));
+    }
+
+    /**
      * Coerces a {@link LocalDate} (the core's boxing of {@code Date}) to a
      * {@link java.sql.Date}. A {@link java.sql.Date} or {@link Instant} input is
      * also accepted for robustness.
@@ -340,12 +416,15 @@ final class JdbcValues {
             return Types.VARCHAR;
         }
 
+        // Unsigned types widen to the next signed JDBC type that holds their full range;
+        // types that overflow long (UInt64 and the 128/256-bit ints) become NUMERIC
+        // (surfaced as BigInteger). Mirrors upstream clickhouse-java jdbc-v2 JdbcUtils.
         return switch (t) {
-            case "UInt8", "Int16", "UInt16" -> Types.SMALLINT;
             case "Int8" -> Types.TINYINT;
-            case "Int32" -> Types.INTEGER;
-            case "UInt32", "Int64", "UInt64" -> Types.BIGINT;
-            case "Int128", "UInt128", "Int256", "UInt256" -> Types.DECIMAL;
+            case "UInt8", "Int16" -> Types.SMALLINT;
+            case "UInt16", "Int32" -> Types.INTEGER;
+            case "UInt32", "Int64" -> Types.BIGINT;
+            case "UInt64", "Int128", "UInt128", "Int256", "UInt256" -> Types.NUMERIC;
             case "Float32" -> Types.REAL;
             case "Float64" -> Types.DOUBLE;
             case "String" -> Types.VARCHAR;
@@ -353,6 +432,111 @@ final class JdbcValues {
             case "UUID" -> Types.OTHER;
             default -> Types.OTHER;
         };
+    }
+
+    /**
+     * Returns the JDBC precision (total number of significant digits) for a ClickHouse
+     * type, or {@code 0} when precision is not meaningful for the type. Only
+     * {@code Decimal(P, S)} carries an explicit precision; {@code Nullable(...)} and
+     * {@code LowCardinality(...)} wrappers are stripped first. Total and non-throwing.
+     *
+     * @param chType the raw ClickHouse type string
+     * @return the precision, or {@code 0} if not applicable
+     */
+    static int precision(String chType) {
+        if (chType == null) {
+            return 0;
+        }
+        String t = unwrap(chType.trim());
+        if (t.startsWith("Decimal(")) {
+            String[] args = typeArgs(t);
+            if (args.length >= 1) {
+                return parseIntOrZero(args[0]);
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Returns the JDBC scale (number of fractional digits) for a ClickHouse type, or
+     * {@code 0} when scale is not meaningful. {@code Decimal(P, S)} yields {@code S};
+     * {@code DateTime64(p)} and {@code Time64(p)} yield {@code p} (their fractional-second
+     * precision). {@code Nullable(...)}/{@code LowCardinality(...)} wrappers are stripped
+     * first. Total and non-throwing.
+     *
+     * @param chType the raw ClickHouse type string
+     * @return the scale, or {@code 0} if not applicable
+     */
+    static int scale(String chType) {
+        if (chType == null) {
+            return 0;
+        }
+        String t = unwrap(chType.trim());
+        if (t.startsWith("Decimal(")) {
+            String[] args = typeArgs(t);
+            if (args.length >= 2) {
+                return parseIntOrZero(args[1]);
+            }
+        }
+        if (t.startsWith("DateTime64(") || t.startsWith("Time64(")) {
+            String[] args = typeArgs(t);
+            if (args.length >= 1) {
+                return parseIntOrZero(args[0]);
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Reinterprets a raw {@code UInt64} bit pattern (which {@code UInt64Codec} boxes as a
+     * signed {@code long}) as its true unsigned value. Values with the high bit set — which
+     * would otherwise appear negative — become the correct positive {@link java.math.BigInteger}
+     * in {@code [0, 2^64-1]}.
+     *
+     * @param bits the raw 64-bit pattern
+     * @return the unsigned value as a {@link java.math.BigInteger}
+     */
+    static java.math.BigInteger unsignedLong(long bits) {
+        java.math.BigInteger low = java.math.BigInteger.valueOf(bits & Long.MAX_VALUE);
+        return bits < 0 ? low.setBit(Long.SIZE - 1) : low;
+    }
+
+    /** Recursively strips {@code Nullable(...)} / {@code LowCardinality(...)} wrappers. */
+    private static String unwrap(String t) {
+        if (t.startsWith("Nullable(") && t.endsWith(")")) {
+            return unwrap(t.substring("Nullable(".length(), t.length() - 1).trim());
+        }
+        if (t.startsWith("LowCardinality(") && t.endsWith(")")) {
+            return unwrap(t.substring("LowCardinality(".length(), t.length() - 1).trim());
+        }
+        return t;
+    }
+
+    /**
+     * Splits the comma-separated parameters of a parameterised type
+     * ({@code "Decimal(10, 2)"} -&gt; {@code ["10", " 2"]}). Returns an empty array when
+     * there are no parentheses. The parameters relevant here (precision, scale, timezone)
+     * contain no nested commas, so a plain split suffices.
+     */
+    private static String[] typeArgs(String t) {
+        int open = t.indexOf('(');
+        int close = t.lastIndexOf(')');
+        if (open < 0 || close <= open) {
+            return new String[0];
+        }
+        String inner = t.substring(open + 1, close).trim();
+        if (inner.isEmpty()) {
+            return new String[0];
+        }
+        return inner.split(",");
+    }
+
+    private static int parseIntOrZero(String s) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     // -----------------------------------------------------------------------

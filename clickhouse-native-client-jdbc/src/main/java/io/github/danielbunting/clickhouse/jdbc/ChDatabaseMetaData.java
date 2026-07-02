@@ -1003,7 +1003,9 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
     @Override
     public ResultSet getTableTypes() throws SQLException {
         return runMeta(
-                "SELECT 'TABLE' AS TABLE_TYPE UNION ALL SELECT 'VIEW' ORDER BY TABLE_TYPE");
+                "SELECT TABLE_TYPE FROM ("
+                + "SELECT 'TABLE' AS TABLE_TYPE UNION ALL SELECT 'VIEW' AS TABLE_TYPE"
+                + ") ORDER BY TABLE_TYPE");
     }
 
     /**
@@ -1215,11 +1217,11 @@ public final class ChDatabaseMetaData implements DatabaseMetaData {
             {"Int8", Types.TINYINT, 3, 0, 10},
             {"UInt8", Types.SMALLINT, 3, 1, 10},
             {"Int16", Types.SMALLINT, 5, 0, 10},
-            {"UInt16", Types.SMALLINT, 5, 1, 10},
+            {"UInt16", Types.INTEGER, 5, 1, 10},
             {"Int32", Types.INTEGER, 10, 0, 10},
             {"UInt32", Types.BIGINT, 10, 1, 10},
             {"Int64", Types.BIGINT, 19, 0, 10},
-            {"UInt64", Types.BIGINT, 20, 1, 10},
+            {"UInt64", Types.NUMERIC, 20, 1, 10},
             {"Float32", Types.REAL, 7, 0, 10},
             {"Float64", Types.DOUBLE, 15, 0, 10},
             {"Decimal", Types.DECIMAL, 76, 0, 10},
